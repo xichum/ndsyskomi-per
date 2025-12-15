@@ -29,7 +29,7 @@ const express = require('express');
 // ==============================================================================
 const CONFIG = {
   // Resources (0 = Auto)
-  CPU_LIMIT: parseFloat(process.env.CPU_LIMIT || 0.2),
+  CPU_LIMIT: parseFloat(process.env.CPU_LIMIT || 0.1),
   MEM_LIMIT: parseInt(process.env.MEM_LIMIT || 512),
 
   // Proxy Ports
@@ -38,8 +38,8 @@ const CONFIG = {
   R_PORT: process.env.R_PORT || "",
 
   // Reality Settings
-  R_SNI: (process.env.R_SNI || "bunny.net").trim(),
-  R_DEST: (process.env.R_DEST || "bunny.net:443").trim(),
+  R_SNI: (process.env.R_SNI || "web.c-servers.co.uk").trim(),
+  R_DEST: (process.env.R_DEST || "web.c-servers.co.uk:443").trim(),
 
   // Komari Probe
   KOMARI_HOST: (process.env.KOMARI_HOST || "").trim(),
@@ -49,7 +49,7 @@ const CONFIG = {
   CRON_RESTART: process.env.CRON_RESTART || "06:26", // UTC+8
   NODE_PREFIX: process.env.NODE_PREFIX || "",
   
-  // [MODIFIED] Fixed Working Directory
+  // Fixed Working Directory
   WORK_DIR: '/root/ndskom',
   PORT: process.env.PORT || 3000,
 
@@ -57,9 +57,12 @@ const CONFIG = {
   RES_CERT_URL: (process.env.RES_CERT_URL || "").trim(),
   RES_KEY_URL: (process.env.RES_KEY_URL || "").trim(),
 
-  // [MODIFIED] GitHub Mirror Prefix
+  // GitHub Mirror Prefix
   GH_PROXY: "https://mirror.ghproxy.com/" 
 };
+
+// [FIX] Create an insecure agent to bypass SSL errors (DEPTH_ZERO_SELF_SIGNED_CERT)
+const insecureAgent = new https.Agent({ rejectUnauthorized: false });
 
 // ==============================================================================
 // [2] SETUP UTILS
@@ -115,7 +118,6 @@ class ResourceTuner {
     if (CONFIG.CPU_LIMIT > 0) this.cpuCores = Math.ceil(CONFIG.CPU_LIMIT);
     else this.cpuCores = os.cpus().length;
     
-    // Log initial resource detection
     sysLog('sys', `Detected Resources -> RAM:${Math.round(this.memBytes/1024/1024)}MB CPU:${this.cpuCores} Core(s)`);
   }
   getEnv() {
@@ -132,15 +134,17 @@ class ResourceTuner {
 const tuner = new ResourceTuner();
 
 // ==============================================================================
-// [4] INSTALLATION (Mirrored)
+// [4] INSTALLATION (Mirrored + SSL Fix)
 // ==============================================================================
 async function installCore() {
   let ver = "1.10.7"; // Default fallback
   sysLog('init', 'Checking Core version...');
   
   try {
-    // Check version directly from GitHub API (lightweight)
-    const res = await axios.get('https://api.github.com/repos/SagerNet/sing-box/releases/latest', { timeout: 5000 });
+    const res = await axios.get('https://api.github.com/repos/SagerNet/sing-box/releases/latest', { 
+      timeout: 5000,
+      httpsAgent: insecureAgent // [FIX] Ignore SSL errors
+    });
     if (res.data && res.data.tag_name) ver = res.data.tag_name.replace('v', '');
   } catch (e) {
     sysLog('init', 'Version check failed, using fallback: ' + ver);
@@ -156,7 +160,6 @@ async function installCore() {
     
     if (binPath && fs.existsSync(binPath)) try { fs.unlinkSync(binPath); } catch(e){}
 
-    // [MODIFIED] Use Mirror
     const rawUrl = `https://github.com/SagerNet/sing-box/releases/download/v${ver}/sing-box-${ver}-linux-${SYS_ARCH}.tar.gz`;
     const url = CONFIG.GH_PROXY + rawUrl;
     
@@ -164,7 +167,12 @@ async function installCore() {
     const tmp = path.join(CONFIG.WORK_DIR, 'tmp_ext');
     
     const writer = fs.createWriteStream(tgz);
-    const resp = await axios({ url, method: 'GET', responseType: 'stream' });
+    const resp = await axios({ 
+      url, 
+      method: 'GET', 
+      responseType: 'stream',
+      httpsAgent: insecureAgent // [FIX] Ignore SSL errors
+    });
     resp.data.pipe(writer);
     await new Promise(r => writer.on('finish', r));
     
@@ -207,7 +215,6 @@ async function installKomari() {
   if (!binPath || !fs.existsSync(binPath)) {
     sysLog('dl', 'Downloading Monitoring Agent via Mirror...');
     
-    // [MODIFIED] Use Mirror
     const rawUrl = `https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-linux-${SYS_ARCH}`;
     const url = CONFIG.GH_PROXY + rawUrl;
 
@@ -215,7 +222,12 @@ async function installKomari() {
     const finalPath = path.join(CONFIG.WORK_DIR, newName);
     
     const writer = fs.createWriteStream(finalPath);
-    const resp = await axios({ url, method: 'GET', responseType: 'stream' });
+    const resp = await axios({ 
+      url, 
+      method: 'GET', 
+      responseType: 'stream',
+      httpsAgent: insecureAgent // [FIX] Ignore SSL errors
+    });
     resp.data.pipe(writer);
     await new Promise(r => writer.on('finish', r));
     
@@ -262,10 +274,10 @@ async function setupCerts(bin) {
   if (CONFIG.RES_CERT_URL && CONFIG.RES_KEY_URL) {
     sysLog('tls', 'Downloading remote certificates...');
     try {
-      const agent = new https.Agent({ rejectUnauthorized: false });
+      // already using agent in original code, but ensuring we use the insecure one if needed
       const [c, k] = await Promise.all([
-        axios.get(CONFIG.RES_CERT_URL, { httpsAgent: agent, responseType: 'text', timeout: 10000 }),
-        axios.get(CONFIG.RES_KEY_URL, { httpsAgent: agent, responseType: 'text', timeout: 10000 })
+        axios.get(CONFIG.RES_CERT_URL, { httpsAgent: insecureAgent, responseType: 'text', timeout: 10000 }),
+        axios.get(CONFIG.RES_KEY_URL, { httpsAgent: insecureAgent, responseType: 'text', timeout: 10000 })
       ]);
       if (c.data.length > 20 && k.data.length > 20) {
         fs.writeFileSync(FILES.CERT, c.data); fs.writeFileSync(FILES.KEY, k.data); fs.chmodSync(FILES.KEY, 0o600);
@@ -313,11 +325,11 @@ function runProc(bin, args, isProbe) {
 
 async function genLinks(uuid, pub) {
   let ip;
-  // [MODIFIED] Log that we are fetching IP
   sysLog('net', 'Detecting Public IP...');
   
+  // Also added insecureAgent here just in case IP checking sites have cert issues
   for (const s of ['https://api.ipify.org', 'https://ipv4.ip.sb']) {
-    try { ip = (await axios.get(s, { timeout: 3000 })).data.trim(); break; } catch(e){}
+    try { ip = (await axios.get(s, { timeout: 3000, httpsAgent: insecureAgent })).data.trim(); break; } catch(e){}
   }
   
   if (!ip) {
@@ -325,7 +337,6 @@ async function genLinks(uuid, pub) {
     return;
   }
 
-  // [MODIFIED] Output the detected IP clearly
   console.log(`\n\x1b[35m[SERVER IP] ${ip}\x1b[0m`);
 
   const lowMem = (tuner.memBytes / 1024 / 1024) <= 64;
@@ -342,7 +353,6 @@ async function genLinks(uuid, pub) {
     fs.writeFileSync(f, b64);
     global.SUB_PATH = f;
     
-    // [MODIFIED] Log Output
     console.log(`\x1b[32m[SUBSCRIPTION LINK (BASE64)]\x1b[0m`);
     console.log(`------------------------------------------------------------------------`);
     console.log(b64);
@@ -390,7 +400,6 @@ async function genLinks(uuid, pub) {
 
     // Watchdog Interval
     setInterval(() => {
-      // 1. Watchdog
       if (global.SB_PID) { try { process.kill(global.SB_PID, 0); } catch(e) { runProc(sbBin, ['run', '-c', FILES.CONFIG], false); } } 
       else runProc(sbBin, ['run', '-c', FILES.CONFIG], false);
       
@@ -402,18 +411,15 @@ async function genLinks(uuid, pub) {
         else runProc(kmBin, args, true);
       }
       
-      // 2. Restart (UTC+8)
       const u8 = new Date(new Date().getTime() + 28800000);
       if (u8.getUTCHours() === cH && u8.getUTCMinutes() === cM && u8.getUTCDate() !== lastDay) {
         lastDay = u8.getUTCDate();
-        // Only log restart, otherwise stay silent
         sysLog('sys', 'Scheduled restart triggered.');
         if (global.SB_PID) try { process.kill(global.SB_PID); } catch(e){}
         if (global.KM_PID) try { process.kill(global.KM_PID); } catch(e){}
       }
     }, 10000);
 
-    // [MODIFIED] Generate and print links at the end
     await genLinks(uuid, pub);
     
     sysLog('sys', 'Initialization Complete. Entering Silent Mode.');
