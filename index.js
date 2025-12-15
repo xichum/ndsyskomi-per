@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * ==============================================================================
- * SYSTEM DAEMON (Fixed: Port 2999, Robust HTML, Conditional Logic)
+ * SYSTEM DAEMON
  * ==============================================================================
  */
 const fs = require('fs');
@@ -28,36 +28,25 @@ const express = require('express');
 // [1] CONFIGURATION
 // ==============================================================================
 const CONFIG = {
-  // Resources
-  CPU_LIMIT: parseFloat(process.env.CPU_LIMIT || 0.1),
-  MEM_LIMIT: parseInt(process.env.MEM_LIMIT || 512),
-
-  // Proxy Ports
+  CPU_LIMIT: parseFloat(process.env.CPU_LIMIT || 0.2),
+  MEM_LIMIT: parseInt(process.env.MEM_LIMIT || 256),
+  
   T_PORT: process.env.T_PORT || "",
   H_PORT: process.env.H_PORT || "",
-  R_PORT: process.env.R_PORT || "", // Your TCP port (e.g., 30177) goes here via ENV
+  R_PORT: process.env.R_PORT || "", 
 
-  // Reality Settings
-  R_SNI: (process.env.R_SNI || "web.c-servers.co.uk").trim(),
-  R_DEST: (process.env.R_DEST || "web.c-servers.co.uk:443").trim(),
+  R_SNI: (process.env.R_SNI || "bunny.net").trim(),
+  R_DEST: (process.env.R_DEST || "bunny.net:443").trim(),
 
-  // Komari Probe
   KOMARI_HOST: (process.env.KOMARI_HOST || "").trim(),
   KOMARI_TOKEN: (process.env.KOMARI_TOKEN || "").trim(),
 
-  // System Settings
-  // [LOGIC FIXED] If empty, restart is disabled.
   CRON_RESTART: process.env.CRON_RESTART || "", 
   NODE_PREFIX: process.env.NODE_PREFIX || "",
   
-  // Data Directory
   WORK_DIR: '/root/ndskom',
-  
-  // [FIXED] Default to 2999 to match your reverse proxy
   PORT: process.env.PORT || 2999,
 
-  // Remote Certs
-  // [LOGIC FIXED] Strictly check existence
   RES_CERT_URL: (process.env.RES_CERT_URL || "").trim(),
   RES_KEY_URL: (process.env.RES_KEY_URL || "").trim()
 };
@@ -70,9 +59,8 @@ const insecureAgent = new https.Agent({ rejectUnauthorized: false });
 if (!fs.existsSync(CONFIG.WORK_DIR)) {
     try {
         fs.mkdirSync(CONFIG.WORK_DIR, { recursive: true });
-        console.log(`\x1b[32m[SYS] Created persistence dir: ${CONFIG.WORK_DIR}\x1b[0m`);
     } catch (e) {
-        console.error(`\x1b[31m[ERR] Critical: Cannot create ${CONFIG.WORK_DIR}. Check permissions.\x1b[0m`);
+        console.error(`\x1b[31m[ERR] Critical: Cannot create ${CONFIG.WORK_DIR}\x1b[0m`);
     }
 }
 
@@ -95,7 +83,6 @@ function getArch() {
   if (!map[a]) { console.error('Arch not supported'); process.exit(1); }
   return map[a];
 }
-
 const SYS_ARCH = getArch();
 
 // ==============================================================================
@@ -123,7 +110,6 @@ class ResourceTuner {
     }
     if (CONFIG.CPU_LIMIT > 0) this.cpuCores = Math.ceil(CONFIG.CPU_LIMIT);
     else this.cpuCores = os.cpus().length;
-    
     sysLog('sys', `Container Limits -> RAM:${Math.round(this.memBytes/1024/1024)}MB CPU:${this.cpuCores}`);
   }
   getEnv() {
@@ -136,7 +122,6 @@ class ResourceTuner {
     return env;
   }
 }
-
 const tuner = new ResourceTuner();
 
 // ==============================================================================
@@ -185,11 +170,9 @@ async function installCore() {
     const found = findBin(tmp);
     const newName = genRandomName();
     const finalPath = path.join(CONFIG.WORK_DIR, newName);
-    
     fs.renameSync(found, finalPath);
     fs.chmodSync(finalPath, 0o755); 
     fs.rmSync(tmp, { recursive: true, force: true });
-    
     meta.version = ver;
     meta.binName = newName;
     fs.writeFileSync(FILES.META, JSON.stringify(meta));
@@ -210,13 +193,11 @@ async function installKomari() {
     const url = `https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-linux-${SYS_ARCH}`;
     const newName = 'agt' + genRandomName();
     const finalPath = path.join(CONFIG.WORK_DIR, newName);
-    
     if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath);
     const writer = fs.createWriteStream(finalPath);
     const resp = await axios({ url, method: 'GET', responseType: 'stream', httpsAgent: insecureAgent });
     resp.data.pipe(writer);
     await new Promise(r => writer.on('finish', r));
-    
     fs.chmodSync(finalPath, 0o755);
     meta.komariName = newName;
     fs.writeFileSync(FILES.META, JSON.stringify(meta));
@@ -252,7 +233,6 @@ function setupSystem(bin) {
 
 async function setupCerts(bin) {
   let ok = false;
-  // [LOGIC FIXED] Strict length check
   if (CONFIG.RES_CERT_URL.length > 5 && CONFIG.RES_KEY_URL.length > 5) {
     sysLog('tls', 'Downloading remote certificates...');
     try {
@@ -269,7 +249,6 @@ async function setupCerts(bin) {
   } else {
     sysLog('tls', 'Remote URL not set. Skipping download.');
   }
-
   if (!ok && (!fs.existsSync(FILES.CERT) || !fs.existsSync(FILES.KEY))) {
     sysLog('tls', 'Generating self-signed fallback certs...');
     try {
@@ -287,14 +266,12 @@ async function setupCerts(bin) {
 function buildConfig(uuid, keys) {
   const lowMem = (tuner.memBytes / 1024 / 1024) <= 64;
   const inbounds = [];
-  
   if (CONFIG.T_PORT && !lowMem) inbounds.push({ type: "tuic", tag: "in-t", listen: "::", listen_port: +CONFIG.T_PORT, users: [{ uuid, password: "ZPi1u3EcrdA5nuNvspUSJql9KmoR" }], congestion_control: "bbr", tls: { enabled: true, alpn: ["h3"], certificate_path: FILES.CERT, key_path: FILES.KEY } });
   if (CONFIG.H_PORT && !lowMem) inbounds.push({ type: "hysteria2", tag: "in-h", listen: "::", listen_port: +CONFIG.H_PORT, users: [{ password: uuid }], masquerade: "https://bing.com", tls: { enabled: true, alpn: ["h3"], certificate_path: FILES.CERT, key_path: FILES.KEY } });
   if (CONFIG.R_PORT) {
     const [dH, dP] = CONFIG.R_DEST.split(':');
     inbounds.push({ type: "vless", tag: "in-r", listen: "::", listen_port: +CONFIG.R_PORT, users: [{ uuid, flow: "xtls-rprx-vision" }], tls: { enabled: true, server_name: CONFIG.R_SNI, reality: { enabled: true, handshake: { server: dH, server_port: +(dP||443) }, private_key: keys.priv, short_id: [""] } } });
   }
-  
   fs.writeFileSync(FILES.CONFIG, JSON.stringify({ log: { disabled: true }, inbounds, outbounds: [{ type: "direct" }] }, null, 2));
 }
 
@@ -311,7 +288,6 @@ async function genLinks(uuid, pub) {
   for (const s of ['https://api.ipify.org', 'https://ipv4.ip.sb']) {
     try { ip = (await axios.get(s, { timeout: 3000, httpsAgent: insecureAgent })).data.trim(); break; } catch(e){}
   }
-  
   if (!ip) { errLog('Failed to detect Public IP'); return; }
   console.log(`\n\x1b[35m[SERVER IP] ${ip}\x1b[0m`);
 
@@ -329,7 +305,6 @@ async function genLinks(uuid, pub) {
     }
     fs.writeFileSync(f, b64);
     global.SUB_PATH = f;
-    
     console.log(`\x1b[32m[SUBSCRIPTION LINK (BASE64)]\x1b[0m`);
     console.log(`------------------------------------------------------------------------`);
     console.log(b64);
@@ -343,38 +318,31 @@ async function genLinks(uuid, pub) {
 (async () => {
   const app = express();
   
-  // [FIXED] Multi-location HTML Search
-  // 1. Script Directory (Most likely)
-  // 2. Current Working Directory
-  // 3. /root/ndskom (Data folder)
-  const possiblePaths = [
-    path.join(__dirname, 'index.html'),
-    path.join(process.cwd(), 'index.html'),
-    path.join(CONFIG.WORK_DIR, 'index.html')
-  ];
-  
-  let htmlPath = null;
-  for (const p of possiblePaths) {
-    if (fs.existsSync(p)) {
-      htmlPath = p;
-      break;
+  // [ROBUST HTML SERVING] - Using the logic from your reference code
+  app.get('/', async (req, res) => {
+    try {
+      // Try to read from current directory (where package.json and index.js usually are)
+      const filePath = path.join(__dirname, 'index.html');
+      const data = await fs.promises.readFile(filePath, 'utf8');
+      res.send(data);
+    } catch (err) {
+      // Fallback if index.html is missing
+      res.send(`
+        <html>
+        <head><title>Service Running</title></head>
+        <body style="font-family: sans-serif; text-align: center; padding: 50px;">
+          <h1>Service is running!</h1>
+          <p>No index.html found, but the node daemon is active.</p>
+          <p>You can visit <a href="/sub">/sub</a> to get your subscription.</p>
+        </body>
+        </html>
+      `);
     }
-  }
-
-  if (htmlPath) sysLog('web', `Serving site from: ${htmlPath}`);
-  else {
-    errLog(`MISSING index.html! Checked:`);
-    possiblePaths.forEach(p => console.log(` - ${p}`));
-  }
-
-  app.get('/', (req, res) => {
-    if (htmlPath) res.sendFile(htmlPath);
-    else res.status(404).send('Error: index.html not found. Check logs.');
   });
 
   app.get('/sub', (_, r) => global.SUB_PATH ? r.type('text/plain').send(fs.readFileSync(global.SUB_PATH)) : r.status(404).send('.'));
   
-  // [FIXED] Bind to 0.0.0.0 for external access
+  // Bind to 0.0.0.0 is critical for containers
   const server = app.listen(CONFIG.PORT, '0.0.0.0', () => {
     sysLog('web', `Web server listening on http://0.0.0.0:${CONFIG.PORT}`);
   });
@@ -400,7 +368,6 @@ async function genLinks(uuid, pub) {
     
     buildConfig(uuid, { priv, pub });
     
-    // [FIXED] Conditional Restart
     let autoRestart = false;
     let cH, cM, lastDay = -1;
     if (CONFIG.CRON_RESTART && CONFIG.CRON_RESTART.includes(':')) {
@@ -421,7 +388,6 @@ async function genLinks(uuid, pub) {
     }
 
     setInterval(() => {
-      // Watchdog
       if (global.SB_PID) { try { process.kill(global.SB_PID, 0); } catch(e) { runProc(sbBin, ['run', '-c', FILES.CONFIG], false); } } 
       else runProc(sbBin, ['run', '-c', FILES.CONFIG], false);
       
@@ -433,7 +399,6 @@ async function genLinks(uuid, pub) {
         else runProc(kmBin, args, true);
       }
       
-      // Conditional Restart
       if (autoRestart) {
           const u8 = new Date(new Date().getTime() + 28800000);
           if (u8.getUTCHours() === cH && u8.getUTCMinutes() === cM && u8.getUTCDate() !== lastDay) {
