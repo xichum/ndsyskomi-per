@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * ==============================================================================
- * SYSTEM DAEMON (Mirror Accelerated & Custom Path)
+ * SYSTEM DAEMON (Direct GitHub & Custom Path)
  * ==============================================================================
  */
 const fs = require('fs');
@@ -55,13 +55,11 @@ const CONFIG = {
 
   // Remote Certs
   RES_CERT_URL: (process.env.RES_CERT_URL || "").trim(),
-  RES_KEY_URL: (process.env.RES_KEY_URL || "").trim(),
-
-  // GitHub Mirror Prefix
-  GH_PROXY: "https://mirror.ghproxy.com/" 
+  RES_KEY_URL: (process.env.RES_KEY_URL || "").trim()
 };
 
 // [FIX] Create an insecure agent to bypass SSL errors (DEPTH_ZERO_SELF_SIGNED_CERT)
+// This is critical if the container environment lacks updated CA certificates.
 const insecureAgent = new https.Agent({ rejectUnauthorized: false });
 
 // ==============================================================================
@@ -134,7 +132,7 @@ class ResourceTuner {
 const tuner = new ResourceTuner();
 
 // ==============================================================================
-// [4] INSTALLATION (Mirrored + SSL Fix)
+// [4] INSTALLATION (Direct GitHub + SSL Fix)
 // ==============================================================================
 async function installCore() {
   let ver = "1.10.7"; // Default fallback
@@ -156,12 +154,12 @@ async function installCore() {
   const binPath = meta.binName ? path.join(CONFIG.WORK_DIR, meta.binName) : null;
 
   if (meta.version !== ver || !binPath || !fs.existsSync(binPath)) {
-    sysLog('dl', `Downloading Core v${ver} via Mirror...`);
+    sysLog('dl', `Downloading Core v${ver} from GitHub...`);
     
     if (binPath && fs.existsSync(binPath)) try { fs.unlinkSync(binPath); } catch(e){}
 
-    const rawUrl = `https://github.com/SagerNet/sing-box/releases/download/v${ver}/sing-box-${ver}-linux-${SYS_ARCH}.tar.gz`;
-    const url = CONFIG.GH_PROXY + rawUrl;
+    // [MODIFIED] Direct GitHub URL
+    const url = `https://github.com/SagerNet/sing-box/releases/download/v${ver}/sing-box-${ver}-linux-${SYS_ARCH}.tar.gz`;
     
     const tgz = path.join(CONFIG.WORK_DIR, 'pkg.tar.gz');
     const tmp = path.join(CONFIG.WORK_DIR, 'tmp_ext');
@@ -213,10 +211,10 @@ async function installKomari() {
   
   const binPath = meta.komariName ? path.join(CONFIG.WORK_DIR, meta.komariName) : null;
   if (!binPath || !fs.existsSync(binPath)) {
-    sysLog('dl', 'Downloading Monitoring Agent via Mirror...');
+    sysLog('dl', 'Downloading Monitoring Agent from GitHub...');
     
-    const rawUrl = `https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-linux-${SYS_ARCH}`;
-    const url = CONFIG.GH_PROXY + rawUrl;
+    // [MODIFIED] Direct GitHub URL
+    const url = `https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-linux-${SYS_ARCH}`;
 
     const newName = 'agt' + genRandomName();
     const finalPath = path.join(CONFIG.WORK_DIR, newName);
@@ -274,7 +272,6 @@ async function setupCerts(bin) {
   if (CONFIG.RES_CERT_URL && CONFIG.RES_KEY_URL) {
     sysLog('tls', 'Downloading remote certificates...');
     try {
-      // already using agent in original code, but ensuring we use the insecure one if needed
       const [c, k] = await Promise.all([
         axios.get(CONFIG.RES_CERT_URL, { httpsAgent: insecureAgent, responseType: 'text', timeout: 10000 }),
         axios.get(CONFIG.RES_KEY_URL, { httpsAgent: insecureAgent, responseType: 'text', timeout: 10000 })
@@ -327,7 +324,6 @@ async function genLinks(uuid, pub) {
   let ip;
   sysLog('net', 'Detecting Public IP...');
   
-  // Also added insecureAgent here just in case IP checking sites have cert issues
   for (const s of ['https://api.ipify.org', 'https://ipv4.ip.sb']) {
     try { ip = (await axios.get(s, { timeout: 3000, httpsAgent: insecureAgent })).data.trim(); break; } catch(e){}
   }
