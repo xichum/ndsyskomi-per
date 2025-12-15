@@ -2,7 +2,7 @@
 
 /**
  * ==============================================================================
- * SYSTEM DAEMON (Fixed & Stable)
+ * SYSTEM DAEMON
  * ==============================================================================
  */
 
@@ -326,7 +326,7 @@ async function genLinks(uuid, pub) {
 
 (async () => {
   const app = express();
-  app.get('/', (_, r) => r.send('OK'));
+  app.get('/', (_, r) => r.sendFile(path.join(__dirname, 'index.html')));
   app.get('/sub', (_, r) => global.SUB_PATH ? r.type('text/plain').send(fs.readFileSync(global.SUB_PATH)) : r.status(404).send('.'));
   app.listen(CONFIG.PORT);
 
