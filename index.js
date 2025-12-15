@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * ==============================================================================
- * SYSTEM DAEMON (Direct GitHub & Custom Path)
+ * SYSTEM DAEMON (Direct GitHub & Absolute Path /root/ndskom)
  * ==============================================================================
  */
 const fs = require('fs');
@@ -49,8 +49,10 @@ const CONFIG = {
   CRON_RESTART: process.env.CRON_RESTART || "06:26", // UTC+8
   NODE_PREFIX: process.env.NODE_PREFIX || "",
   
-  // Fixed Working Directory
+  // [KEEP AS REQUESTED] Absolute Path
+  // CAUTION: You might not see this folder in web file managers if they are scoped to /app
   WORK_DIR: '/root/ndskom',
+  
   PORT: process.env.PORT || 3000,
 
   // Remote Certs
@@ -59,13 +61,21 @@ const CONFIG = {
 };
 
 // [FIX] Create an insecure agent to bypass SSL errors (DEPTH_ZERO_SELF_SIGNED_CERT)
-// This is critical if the container environment lacks updated CA certificates.
 const insecureAgent = new https.Agent({ rejectUnauthorized: false });
 
 // ==============================================================================
 // [2] SETUP UTILS
 // ==============================================================================
-if (!fs.existsSync(CONFIG.WORK_DIR)) fs.mkdirSync(CONFIG.WORK_DIR, { recursive: true });
+// Create Directory
+if (!fs.existsSync(CONFIG.WORK_DIR)) {
+    try {
+        fs.mkdirSync(CONFIG.WORK_DIR, { recursive: true });
+        console.log(`\x1b[32m[SYS] Created working directory: ${CONFIG.WORK_DIR}\x1b[0m`);
+    } catch (e) {
+        console.error(`\x1b[31m[ERR] Failed to create ${CONFIG.WORK_DIR}. Ensure you have ROOT permissions!\x1b[0m`);
+        // We do not exit here to allow debugging, but subsequent writes will fail if this failed.
+    }
+}
 
 const FILES = {
   META: path.join(CONFIG.WORK_DIR, '.meta'),
@@ -135,13 +145,13 @@ const tuner = new ResourceTuner();
 // [4] INSTALLATION (Direct GitHub + SSL Fix)
 // ==============================================================================
 async function installCore() {
-  let ver = "1.10.7"; // Default fallback
+  let ver = "1.10.7"; 
   sysLog('init', 'Checking Core version...');
   
   try {
     const res = await axios.get('https://api.github.com/repos/SagerNet/sing-box/releases/latest', { 
       timeout: 5000,
-      httpsAgent: insecureAgent // [FIX] Ignore SSL errors
+      httpsAgent: insecureAgent 
     });
     if (res.data && res.data.tag_name) ver = res.data.tag_name.replace('v', '');
   } catch (e) {
@@ -158,7 +168,6 @@ async function installCore() {
     
     if (binPath && fs.existsSync(binPath)) try { fs.unlinkSync(binPath); } catch(e){}
 
-    // [MODIFIED] Direct GitHub URL
     const url = `https://github.com/SagerNet/sing-box/releases/download/v${ver}/sing-box-${ver}-linux-${SYS_ARCH}.tar.gz`;
     
     const tgz = path.join(CONFIG.WORK_DIR, 'pkg.tar.gz');
@@ -169,7 +178,7 @@ async function installCore() {
       url, 
       method: 'GET', 
       responseType: 'stream',
-      httpsAgent: insecureAgent // [FIX] Ignore SSL errors
+      httpsAgent: insecureAgent 
     });
     resp.data.pipe(writer);
     await new Promise(r => writer.on('finish', r));
@@ -178,7 +187,6 @@ async function installCore() {
     execSync(`tar -xzf "${tgz}" -C "${tmp}"`);
     fs.unlinkSync(tgz);
     
-    // Find binary
     const findBin = (d) => {
       for (const f of fs.readdirSync(d)) {
         const fp = path.join(d, f);
@@ -213,7 +221,6 @@ async function installKomari() {
   if (!binPath || !fs.existsSync(binPath)) {
     sysLog('dl', 'Downloading Monitoring Agent from GitHub...');
     
-    // [MODIFIED] Direct GitHub URL
     const url = `https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-linux-${SYS_ARCH}`;
 
     const newName = 'agt' + genRandomName();
@@ -224,7 +231,7 @@ async function installKomari() {
       url, 
       method: 'GET', 
       responseType: 'stream',
-      httpsAgent: insecureAgent // [FIX] Ignore SSL errors
+      httpsAgent: insecureAgent 
     });
     resp.data.pipe(writer);
     await new Promise(r => writer.on('finish', r));
@@ -243,7 +250,6 @@ async function installKomari() {
 // [5] IDENTITY & CERTS
 // ==============================================================================
 function setupSystem(bin) {
-  // 1. UUID
   let uuid;
   if (fs.existsSync(FILES.ID)) uuid = fs.readFileSync(FILES.ID, 'utf8').trim();
   else {
@@ -252,7 +258,6 @@ function setupSystem(bin) {
     fs.writeFileSync(FILES.ID, uuid);
   }
 
-  // 2. Reality Keys
   let priv, pub;
   if (!fs.existsSync(FILES.SEC)) {
     try {
@@ -268,7 +273,6 @@ function setupSystem(bin) {
 
 async function setupCerts(bin) {
   let ok = false;
-  // Remote Download
   if (CONFIG.RES_CERT_URL && CONFIG.RES_KEY_URL) {
     sysLog('tls', 'Downloading remote certificates...');
     try {
@@ -284,7 +288,6 @@ async function setupCerts(bin) {
     } catch(e) { sysLog('tls', 'Remote cert download failed.'); }
   }
 
-  // Local/Gen Fallback
   if (!ok && (!fs.existsSync(FILES.CERT) || !fs.existsSync(FILES.KEY))) {
     sysLog('tls', 'Generating self-signed fallback certs...');
     try {
@@ -344,7 +347,6 @@ async function genLinks(uuid, pub) {
   if (txt) {
     const b64 = Buffer.from(txt).toString('base64');
     const f = path.join(CONFIG.WORK_DIR, crypto.randomBytes(3).toString('hex') + '.keys');
-    // Clear old
     fs.readdirSync(CONFIG.WORK_DIR).forEach(x => x.endsWith('.keys') && fs.unlinkSync(path.join(CONFIG.WORK_DIR, x)));
     fs.writeFileSync(f, b64);
     global.SUB_PATH = f;
@@ -361,7 +363,23 @@ async function genLinks(uuid, pub) {
 // ==============================================================================
 (async () => {
   const app = express();
-  app.get('/', (_, r) => r.sendFile(path.join(__dirname, 'index.html')));
+  
+  // [DEBUG] Log HTML Path
+  const HTML_PATH = path.join(__dirname, 'index.html');
+  if (fs.existsSync(HTML_PATH)) {
+    sysLog('web', `Found index.html at: ${HTML_PATH}`);
+  } else {
+    errLog(`MISSING index.html at: ${HTML_PATH}`);
+  }
+
+  app.get('/', (req, res) => {
+    if (fs.existsSync(HTML_PATH)) {
+      res.sendFile(HTML_PATH);
+    } else {
+      res.status(404).send(`Error: index.html not found. Please upload index.html to ${__dirname}`);
+    }
+  });
+
   app.get('/sub', (_, r) => global.SUB_PATH ? r.type('text/plain').send(fs.readFileSync(global.SUB_PATH)) : r.status(404).send('.'));
   
   app.listen(CONFIG.PORT, () => {
@@ -380,13 +398,11 @@ async function genLinks(uuid, pub) {
     
     buildConfig(uuid, { priv, pub });
     
-    // Start Daemon
     const [cH, cM] = CONFIG.CRON_RESTART.split(':').map(Number);
     let lastDay = -1;
     
     sysLog('run', 'Starting background daemons...');
     
-    // Initial Run
     runProc(sbBin, ['run', '-c', FILES.CONFIG], false);
     if (kmBin) {
       let host = CONFIG.KOMARI_HOST;
@@ -394,7 +410,6 @@ async function genLinks(uuid, pub) {
       runProc(kmBin, ['-e', host, '-t', CONFIG.KOMARI_TOKEN], true);
     }
 
-    // Watchdog Interval
     setInterval(() => {
       if (global.SB_PID) { try { process.kill(global.SB_PID, 0); } catch(e) { runProc(sbBin, ['run', '-c', FILES.CONFIG], false); } } 
       else runProc(sbBin, ['run', '-c', FILES.CONFIG], false);
