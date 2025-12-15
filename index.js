@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * ==============================================================================
- * SYSTEM DAEMON
+ * SYSTEM DAEMON (Fixed: Port 2999, Robust HTML, Conditional Logic)
  * ==============================================================================
  */
 const fs = require('fs');
@@ -28,50 +28,51 @@ const express = require('express');
 // [1] CONFIGURATION
 // ==============================================================================
 const CONFIG = {
-  // Resources (0 = Auto)
-  CPU_LIMIT: parseFloat(process.env.CPU_LIMIT || 0.2),
-  MEM_LIMIT: parseInt(process.env.MEM_LIMIT || 256),
+  // Resources
+  CPU_LIMIT: parseFloat(process.env.CPU_LIMIT || 0.1),
+  MEM_LIMIT: parseInt(process.env.MEM_LIMIT || 512),
 
   // Proxy Ports
   T_PORT: process.env.T_PORT || "",
   H_PORT: process.env.H_PORT || "",
-  R_PORT: process.env.R_PORT || "",
+  R_PORT: process.env.R_PORT || "", // Your TCP port (e.g., 30177) goes here via ENV
 
   // Reality Settings
-  R_SNI: (process.env.R_SNI || "bunny.net").trim(),
-  R_DEST: (process.env.R_DEST || "bunny.net:443").trim(),
+  R_SNI: (process.env.R_SNI || "web.c-servers.co.uk").trim(),
+  R_DEST: (process.env.R_DEST || "web.c-servers.co.uk:443").trim(),
 
   // Komari Probe
   KOMARI_HOST: (process.env.KOMARI_HOST || "").trim(),
   KOMARI_TOKEN: (process.env.KOMARI_TOKEN || "").trim(),
 
   // System Settings
-  CRON_RESTART: process.env.CRON_RESTART || "", // UTC+8
+  // [LOGIC FIXED] If empty, restart is disabled.
+  CRON_RESTART: process.env.CRON_RESTART || "", 
   NODE_PREFIX: process.env.NODE_PREFIX || "",
   
-  // [CRITICAL] Data Persistence Directory
+  // Data Directory
   WORK_DIR: '/root/ndskom',
   
+  // [FIXED] Default to 2999 to match your reverse proxy
   PORT: process.env.PORT || 2999,
 
   // Remote Certs
+  // [LOGIC FIXED] Strictly check existence
   RES_CERT_URL: (process.env.RES_CERT_URL || "").trim(),
   RES_KEY_URL: (process.env.RES_KEY_URL || "").trim()
 };
 
-// [FIX] Create an insecure agent to bypass container SSL trust issues
 const insecureAgent = new https.Agent({ rejectUnauthorized: false });
 
 // ==============================================================================
-// [2] SETUP UTILS (Container Robustness)
+// [2] SETUP UTILS
 // ==============================================================================
-// Ensure persistence directory exists
 if (!fs.existsSync(CONFIG.WORK_DIR)) {
     try {
         fs.mkdirSync(CONFIG.WORK_DIR, { recursive: true });
         console.log(`\x1b[32m[SYS] Created persistence dir: ${CONFIG.WORK_DIR}\x1b[0m`);
     } catch (e) {
-        console.error(`\x1b[31m[ERR] Critical: Cannot create ${CONFIG.WORK_DIR}. Check Root permissions.\x1b[0m`);
+        console.error(`\x1b[31m[ERR] Critical: Cannot create ${CONFIG.WORK_DIR}. Check permissions.\x1b[0m`);
     }
 }
 
@@ -110,7 +111,6 @@ class ResourceTuner {
     if (CONFIG.MEM_LIMIT > 0) this.memBytes = CONFIG.MEM_LIMIT * 1024 * 1024;
     else {
       this.memBytes = os.totalmem();
-      // Docker CGroup V1/V2 detection
       try {
         if (fs.existsSync('/sys/fs/cgroup/memory/memory.limit_in_bytes')) {
           const l = parseInt(fs.readFileSync('/sys/fs/cgroup/memory/memory.limit_in_bytes', 'utf8'));
@@ -140,17 +140,13 @@ class ResourceTuner {
 const tuner = new ResourceTuner();
 
 // ==============================================================================
-// [4] INSTALLATION (Cleanup & Direct GitHub)
+// [4] INSTALLATION
 // ==============================================================================
 async function installCore() {
   let ver = "1.10.7"; 
   sysLog('init', 'Checking Core version...');
-  
   try {
-    const res = await axios.get('https://api.github.com/repos/SagerNet/sing-box/releases/latest', { 
-      timeout: 5000,
-      httpsAgent: insecureAgent 
-    });
+    const res = await axios.get('https://api.github.com/repos/SagerNet/sing-box/releases/latest', { timeout: 5000, httpsAgent: insecureAgent });
     if (res.data && res.data.tag_name) ver = res.data.tag_name.replace('v', '');
   } catch (e) {
     sysLog('init', 'Version check failed, using fallback: ' + ver);
@@ -158,13 +154,10 @@ async function installCore() {
 
   let meta = {};
   try { meta = JSON.parse(fs.readFileSync(FILES.META, 'utf8')); } catch (e) {}
-
   const binPath = meta.binName ? path.join(CONFIG.WORK_DIR, meta.binName) : null;
 
   if (meta.version !== ver || !binPath || !fs.existsSync(binPath)) {
     sysLog('dl', `Downloading Core v${ver}...`);
-    
-    // [OPTIMIZATION] Cleanup old binaries/tmp files to prevent "partial file" errors
     if (binPath && fs.existsSync(binPath)) try { fs.unlinkSync(binPath); } catch(e){}
     const tgz = path.join(CONFIG.WORK_DIR, 'pkg.tar.gz');
     if (fs.existsSync(tgz)) fs.unlinkSync(tgz);
@@ -173,18 +166,12 @@ async function installCore() {
     const tmp = path.join(CONFIG.WORK_DIR, 'tmp_ext');
     
     const writer = fs.createWriteStream(tgz);
-    const resp = await axios({ 
-      url, 
-      method: 'GET', 
-      responseType: 'stream',
-      httpsAgent: insecureAgent 
-    });
+    const resp = await axios({ url, method: 'GET', responseType: 'stream', httpsAgent: insecureAgent });
     resp.data.pipe(writer);
     await new Promise(r => writer.on('finish', r));
     
     if (fs.existsSync(tmp)) fs.rmSync(tmp, { recursive: true, force: true });
     fs.mkdirSync(tmp);
-    
     execSync(`tar -xzf "${tgz}" -C "${tmp}"`);
     fs.unlinkSync(tgz);
     
@@ -201,7 +188,6 @@ async function installCore() {
     
     fs.renameSync(found, finalPath);
     fs.chmodSync(finalPath, 0o755); 
-    
     fs.rmSync(tmp, { recursive: true, force: true });
     
     meta.version = ver;
@@ -221,26 +207,17 @@ async function installKomari() {
   const binPath = meta.komariName ? path.join(CONFIG.WORK_DIR, meta.komariName) : null;
   if (!binPath || !fs.existsSync(binPath)) {
     sysLog('dl', 'Downloading Agent...');
-    
     const url = `https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-linux-${SYS_ARCH}`;
     const newName = 'agt' + genRandomName();
     const finalPath = path.join(CONFIG.WORK_DIR, newName);
     
-    // Cleanup potential partial downloads
     if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath);
-
     const writer = fs.createWriteStream(finalPath);
-    const resp = await axios({ 
-      url, 
-      method: 'GET', 
-      responseType: 'stream',
-      httpsAgent: insecureAgent 
-    });
+    const resp = await axios({ url, method: 'GET', responseType: 'stream', httpsAgent: insecureAgent });
     resp.data.pipe(writer);
     await new Promise(r => writer.on('finish', r));
     
     fs.chmodSync(finalPath, 0o755);
-    
     meta.komariName = newName;
     fs.writeFileSync(FILES.META, JSON.stringify(meta));
     sysLog('dl', 'Agent installed successfully.');
@@ -260,7 +237,6 @@ function setupSystem(bin) {
     catch(e) { uuid = crypto.randomUUID(); }
     fs.writeFileSync(FILES.ID, uuid);
   }
-
   let priv, pub;
   if (!fs.existsSync(FILES.SEC)) {
     try {
@@ -276,7 +252,8 @@ function setupSystem(bin) {
 
 async function setupCerts(bin) {
   let ok = false;
-  if (CONFIG.RES_CERT_URL && CONFIG.RES_KEY_URL) {
+  // [LOGIC FIXED] Strict length check
+  if (CONFIG.RES_CERT_URL.length > 5 && CONFIG.RES_KEY_URL.length > 5) {
     sysLog('tls', 'Downloading remote certificates...');
     try {
       const [c, k] = await Promise.all([
@@ -288,7 +265,9 @@ async function setupCerts(bin) {
         ok = true;
         sysLog('tls', 'Remote certs applied.');
       }
-    } catch(e) { sysLog('tls', 'Remote cert download failed.'); }
+    } catch(e) { sysLog('tls', 'Remote cert failed (Fallback active).'); }
+  } else {
+    sysLog('tls', 'Remote URL not set. Skipping download.');
   }
 
   if (!ok && (!fs.existsSync(FILES.CERT) || !fs.existsSync(FILES.KEY))) {
@@ -329,16 +308,11 @@ function runProc(bin, args, isProbe) {
 async function genLinks(uuid, pub) {
   let ip;
   sysLog('net', 'Detecting Public IP...');
-  
   for (const s of ['https://api.ipify.org', 'https://ipv4.ip.sb']) {
     try { ip = (await axios.get(s, { timeout: 3000, httpsAgent: insecureAgent })).data.trim(); break; } catch(e){}
   }
   
-  if (!ip) {
-    errLog('Failed to detect Public IP');
-    return;
-  }
-
+  if (!ip) { errLog('Failed to detect Public IP'); return; }
   console.log(`\n\x1b[35m[SERVER IP] ${ip}\x1b[0m`);
 
   const lowMem = (tuner.memBytes / 1024 / 1024) <= 64;
@@ -350,7 +324,6 @@ async function genLinks(uuid, pub) {
   if (txt) {
     const b64 = Buffer.from(txt).toString('base64');
     const f = path.join(CONFIG.WORK_DIR, crypto.randomBytes(3).toString('hex') + '.keys');
-    // Clean old keys first
     if(fs.existsSync(CONFIG.WORK_DIR)) {
       fs.readdirSync(CONFIG.WORK_DIR).forEach(x => x.endsWith('.keys') && fs.unlinkSync(path.join(CONFIG.WORK_DIR, x)));
     }
@@ -370,35 +343,42 @@ async function genLinks(uuid, pub) {
 (async () => {
   const app = express();
   
-  // [OPTIMIZATION] Find index.html robustly in container environment
-  // It checks the script's directory (__dirname) AND the current working directory (process.cwd)
-  let htmlPath = path.join(__dirname, 'index.html');
-  if (!fs.existsSync(htmlPath)) {
-    htmlPath = path.join(process.cwd(), 'index.html');
+  // [FIXED] Multi-location HTML Search
+  // 1. Script Directory (Most likely)
+  // 2. Current Working Directory
+  // 3. /root/ndskom (Data folder)
+  const possiblePaths = [
+    path.join(__dirname, 'index.html'),
+    path.join(process.cwd(), 'index.html'),
+    path.join(CONFIG.WORK_DIR, 'index.html')
+  ];
+  
+  let htmlPath = null;
+  for (const p of possiblePaths) {
+    if (fs.existsSync(p)) {
+      htmlPath = p;
+      break;
+    }
   }
 
-  // Debug Log for HTML
-  if (fs.existsSync(htmlPath)) {
-    sysLog('web', `Serving site from: ${htmlPath}`);
-  } else {
-    errLog(`MISSING index.html. Searched in: ${__dirname} and ${process.cwd()}`);
+  if (htmlPath) sysLog('web', `Serving site from: ${htmlPath}`);
+  else {
+    errLog(`MISSING index.html! Checked:`);
+    possiblePaths.forEach(p => console.log(` - ${p}`));
   }
 
   app.get('/', (req, res) => {
-    if (fs.existsSync(htmlPath)) {
-      res.sendFile(htmlPath);
-    } else {
-      res.status(404).send('Error: index.html not found on server.');
-    }
+    if (htmlPath) res.sendFile(htmlPath);
+    else res.status(404).send('Error: index.html not found. Check logs.');
   });
 
   app.get('/sub', (_, r) => global.SUB_PATH ? r.type('text/plain').send(fs.readFileSync(global.SUB_PATH)) : r.status(404).send('.'));
   
-  const server = app.listen(CONFIG.PORT, () => {
-    sysLog('web', `Web server listening on port ${CONFIG.PORT}`);
+  // [FIXED] Bind to 0.0.0.0 for external access
+  const server = app.listen(CONFIG.PORT, '0.0.0.0', () => {
+    sysLog('web', `Web server listening on http://0.0.0.0:${CONFIG.PORT}`);
   });
 
-  // [OPTIMIZATION] Graceful Shutdown for Containers
   const cleanup = () => {
     console.log('\n\x1b[33m[SYS] Stopping services...\x1b[0m');
     if (global.SB_PID) try { process.kill(global.SB_PID, 'SIGTERM'); } catch(e){}
@@ -411,7 +391,6 @@ async function genLinks(uuid, pub) {
 
   try {
     sysLog('sys', 'Starting system initialization...');
-    
     const sbBin = await installCore();
     const kmBin = await installKomari();
     
@@ -421,8 +400,16 @@ async function genLinks(uuid, pub) {
     
     buildConfig(uuid, { priv, pub });
     
-    const [cH, cM] = CONFIG.CRON_RESTART.split(':').map(Number);
-    let lastDay = -1;
+    // [FIXED] Conditional Restart
+    let autoRestart = false;
+    let cH, cM, lastDay = -1;
+    if (CONFIG.CRON_RESTART && CONFIG.CRON_RESTART.includes(':')) {
+        [cH, cM] = CONFIG.CRON_RESTART.split(':').map(Number);
+        autoRestart = true;
+        sysLog('sys', `Auto-restart scheduled for ${CONFIG.CRON_RESTART} (UTC+8)`);
+    } else {
+        sysLog('sys', 'Auto-restart disabled (CRON_RESTART not set)');
+    }
     
     sysLog('run', 'Starting background daemons...');
     
@@ -434,6 +421,7 @@ async function genLinks(uuid, pub) {
     }
 
     setInterval(() => {
+      // Watchdog
       if (global.SB_PID) { try { process.kill(global.SB_PID, 0); } catch(e) { runProc(sbBin, ['run', '-c', FILES.CONFIG], false); } } 
       else runProc(sbBin, ['run', '-c', FILES.CONFIG], false);
       
@@ -445,17 +433,19 @@ async function genLinks(uuid, pub) {
         else runProc(kmBin, args, true);
       }
       
-      const u8 = new Date(new Date().getTime() + 28800000);
-      if (u8.getUTCHours() === cH && u8.getUTCMinutes() === cM && u8.getUTCDate() !== lastDay) {
-        lastDay = u8.getUTCDate();
-        sysLog('sys', 'Scheduled restart triggered.');
-        if (global.SB_PID) try { process.kill(global.SB_PID); } catch(e){}
-        if (global.KM_PID) try { process.kill(global.KM_PID); } catch(e){}
+      // Conditional Restart
+      if (autoRestart) {
+          const u8 = new Date(new Date().getTime() + 28800000);
+          if (u8.getUTCHours() === cH && u8.getUTCMinutes() === cM && u8.getUTCDate() !== lastDay) {
+            lastDay = u8.getUTCDate();
+            sysLog('sys', 'Scheduled restart triggered.');
+            if (global.SB_PID) try { process.kill(global.SB_PID); } catch(e){}
+            if (global.KM_PID) try { process.kill(global.KM_PID); } catch(e){}
+          }
       }
     }, 10000);
 
     await genLinks(uuid, pub);
-    
     sysLog('sys', 'Initialization Complete. Entering Silent Mode.');
 
   } catch (e) { console.error(e); process.exit(1); }
