@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * ==============================================================================
- * SYSTEM DAEMON (Direct GitHub & Absolute Path /root/ndskom)
+ * SYSTEM DAEMON
  * ==============================================================================
  */
 const fs = require('fs');
@@ -29,8 +29,8 @@ const express = require('express');
 // ==============================================================================
 const CONFIG = {
   // Resources (0 = Auto)
-  CPU_LIMIT: parseFloat(process.env.CPU_LIMIT || 0.1),
-  MEM_LIMIT: parseInt(process.env.MEM_LIMIT || 512),
+  CPU_LIMIT: parseFloat(process.env.CPU_LIMIT || 0.2),
+  MEM_LIMIT: parseInt(process.env.MEM_LIMIT || 256),
 
   // Proxy Ports
   T_PORT: process.env.T_PORT || "",
@@ -38,42 +38,40 @@ const CONFIG = {
   R_PORT: process.env.R_PORT || "",
 
   // Reality Settings
-  R_SNI: (process.env.R_SNI || "web.c-servers.co.uk").trim(),
-  R_DEST: (process.env.R_DEST || "web.c-servers.co.uk:443").trim(),
+  R_SNI: (process.env.R_SNI || "bunny.net").trim(),
+  R_DEST: (process.env.R_DEST || "bunny.net:443").trim(),
 
   // Komari Probe
   KOMARI_HOST: (process.env.KOMARI_HOST || "").trim(),
   KOMARI_TOKEN: (process.env.KOMARI_TOKEN || "").trim(),
 
   // System Settings
-  CRON_RESTART: process.env.CRON_RESTART || "06:26", // UTC+8
+  CRON_RESTART: process.env.CRON_RESTART || "", // UTC+8
   NODE_PREFIX: process.env.NODE_PREFIX || "",
   
-  // [KEEP AS REQUESTED] Absolute Path
-  // CAUTION: You might not see this folder in web file managers if they are scoped to /app
+  // [CRITICAL] Data Persistence Directory
   WORK_DIR: '/root/ndskom',
   
-  PORT: process.env.PORT || 3000,
+  PORT: process.env.PORT || 2999,
 
   // Remote Certs
   RES_CERT_URL: (process.env.RES_CERT_URL || "").trim(),
   RES_KEY_URL: (process.env.RES_KEY_URL || "").trim()
 };
 
-// [FIX] Create an insecure agent to bypass SSL errors (DEPTH_ZERO_SELF_SIGNED_CERT)
+// [FIX] Create an insecure agent to bypass container SSL trust issues
 const insecureAgent = new https.Agent({ rejectUnauthorized: false });
 
 // ==============================================================================
-// [2] SETUP UTILS
+// [2] SETUP UTILS (Container Robustness)
 // ==============================================================================
-// Create Directory
+// Ensure persistence directory exists
 if (!fs.existsSync(CONFIG.WORK_DIR)) {
     try {
         fs.mkdirSync(CONFIG.WORK_DIR, { recursive: true });
-        console.log(`\x1b[32m[SYS] Created working directory: ${CONFIG.WORK_DIR}\x1b[0m`);
+        console.log(`\x1b[32m[SYS] Created persistence dir: ${CONFIG.WORK_DIR}\x1b[0m`);
     } catch (e) {
-        console.error(`\x1b[31m[ERR] Failed to create ${CONFIG.WORK_DIR}. Ensure you have ROOT permissions!\x1b[0m`);
-        // We do not exit here to allow debugging, but subsequent writes will fail if this failed.
+        console.error(`\x1b[31m[ERR] Critical: Cannot create ${CONFIG.WORK_DIR}. Check Root permissions.\x1b[0m`);
     }
 }
 
@@ -87,7 +85,6 @@ const FILES = {
 };
 
 const sysLog = (tag, msg) => console.log(`\x1b[90m[${tag}]\x1b[0m ${msg}`);
-const infoLog = (msg) => console.log(`\x1b[36m[INFO]\x1b[0m ${msg}`);
 const errLog = (msg) => console.error(`\x1b[31m[ERR]\x1b[0m ${msg}`);
 const genRandomName = () => 'k' + crypto.randomBytes(4).toString('hex') + 'd';
 
@@ -113,6 +110,7 @@ class ResourceTuner {
     if (CONFIG.MEM_LIMIT > 0) this.memBytes = CONFIG.MEM_LIMIT * 1024 * 1024;
     else {
       this.memBytes = os.totalmem();
+      // Docker CGroup V1/V2 detection
       try {
         if (fs.existsSync('/sys/fs/cgroup/memory/memory.limit_in_bytes')) {
           const l = parseInt(fs.readFileSync('/sys/fs/cgroup/memory/memory.limit_in_bytes', 'utf8'));
@@ -126,7 +124,7 @@ class ResourceTuner {
     if (CONFIG.CPU_LIMIT > 0) this.cpuCores = Math.ceil(CONFIG.CPU_LIMIT);
     else this.cpuCores = os.cpus().length;
     
-    sysLog('sys', `Detected Resources -> RAM:${Math.round(this.memBytes/1024/1024)}MB CPU:${this.cpuCores} Core(s)`);
+    sysLog('sys', `Container Limits -> RAM:${Math.round(this.memBytes/1024/1024)}MB CPU:${this.cpuCores}`);
   }
   getEnv() {
     const env = { ...process.env };
@@ -142,7 +140,7 @@ class ResourceTuner {
 const tuner = new ResourceTuner();
 
 // ==============================================================================
-// [4] INSTALLATION (Direct GitHub + SSL Fix)
+// [4] INSTALLATION (Cleanup & Direct GitHub)
 // ==============================================================================
 async function installCore() {
   let ver = "1.10.7"; 
@@ -164,13 +162,14 @@ async function installCore() {
   const binPath = meta.binName ? path.join(CONFIG.WORK_DIR, meta.binName) : null;
 
   if (meta.version !== ver || !binPath || !fs.existsSync(binPath)) {
-    sysLog('dl', `Downloading Core v${ver} from GitHub...`);
+    sysLog('dl', `Downloading Core v${ver}...`);
     
+    // [OPTIMIZATION] Cleanup old binaries/tmp files to prevent "partial file" errors
     if (binPath && fs.existsSync(binPath)) try { fs.unlinkSync(binPath); } catch(e){}
+    const tgz = path.join(CONFIG.WORK_DIR, 'pkg.tar.gz');
+    if (fs.existsSync(tgz)) fs.unlinkSync(tgz);
 
     const url = `https://github.com/SagerNet/sing-box/releases/download/v${ver}/sing-box-${ver}-linux-${SYS_ARCH}.tar.gz`;
-    
-    const tgz = path.join(CONFIG.WORK_DIR, 'pkg.tar.gz');
     const tmp = path.join(CONFIG.WORK_DIR, 'tmp_ext');
     
     const writer = fs.createWriteStream(tgz);
@@ -183,7 +182,9 @@ async function installCore() {
     resp.data.pipe(writer);
     await new Promise(r => writer.on('finish', r));
     
-    if (!fs.existsSync(tmp)) fs.mkdirSync(tmp);
+    if (fs.existsSync(tmp)) fs.rmSync(tmp, { recursive: true, force: true });
+    fs.mkdirSync(tmp);
+    
     execSync(`tar -xzf "${tgz}" -C "${tmp}"`);
     fs.unlinkSync(tgz);
     
@@ -219,13 +220,15 @@ async function installKomari() {
   
   const binPath = meta.komariName ? path.join(CONFIG.WORK_DIR, meta.komariName) : null;
   if (!binPath || !fs.existsSync(binPath)) {
-    sysLog('dl', 'Downloading Monitoring Agent from GitHub...');
+    sysLog('dl', 'Downloading Agent...');
     
     const url = `https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-linux-${SYS_ARCH}`;
-
     const newName = 'agt' + genRandomName();
     const finalPath = path.join(CONFIG.WORK_DIR, newName);
     
+    // Cleanup potential partial downloads
+    if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath);
+
     const writer = fs.createWriteStream(finalPath);
     const resp = await axios({ 
       url, 
@@ -347,7 +350,10 @@ async function genLinks(uuid, pub) {
   if (txt) {
     const b64 = Buffer.from(txt).toString('base64');
     const f = path.join(CONFIG.WORK_DIR, crypto.randomBytes(3).toString('hex') + '.keys');
-    fs.readdirSync(CONFIG.WORK_DIR).forEach(x => x.endsWith('.keys') && fs.unlinkSync(path.join(CONFIG.WORK_DIR, x)));
+    // Clean old keys first
+    if(fs.existsSync(CONFIG.WORK_DIR)) {
+      fs.readdirSync(CONFIG.WORK_DIR).forEach(x => x.endsWith('.keys') && fs.unlinkSync(path.join(CONFIG.WORK_DIR, x)));
+    }
     fs.writeFileSync(f, b64);
     global.SUB_PATH = f;
     
@@ -359,32 +365,49 @@ async function genLinks(uuid, pub) {
 }
 
 // ==============================================================================
-// [7] MAIN
+// [7] MAIN & PROCESS CONTROL
 // ==============================================================================
 (async () => {
   const app = express();
   
-  // [DEBUG] Log HTML Path
-  const HTML_PATH = path.join(__dirname, 'index.html');
-  if (fs.existsSync(HTML_PATH)) {
-    sysLog('web', `Found index.html at: ${HTML_PATH}`);
+  // [OPTIMIZATION] Find index.html robustly in container environment
+  // It checks the script's directory (__dirname) AND the current working directory (process.cwd)
+  let htmlPath = path.join(__dirname, 'index.html');
+  if (!fs.existsSync(htmlPath)) {
+    htmlPath = path.join(process.cwd(), 'index.html');
+  }
+
+  // Debug Log for HTML
+  if (fs.existsSync(htmlPath)) {
+    sysLog('web', `Serving site from: ${htmlPath}`);
   } else {
-    errLog(`MISSING index.html at: ${HTML_PATH}`);
+    errLog(`MISSING index.html. Searched in: ${__dirname} and ${process.cwd()}`);
   }
 
   app.get('/', (req, res) => {
-    if (fs.existsSync(HTML_PATH)) {
-      res.sendFile(HTML_PATH);
+    if (fs.existsSync(htmlPath)) {
+      res.sendFile(htmlPath);
     } else {
-      res.status(404).send(`Error: index.html not found. Please upload index.html to ${__dirname}`);
+      res.status(404).send('Error: index.html not found on server.');
     }
   });
 
   app.get('/sub', (_, r) => global.SUB_PATH ? r.type('text/plain').send(fs.readFileSync(global.SUB_PATH)) : r.status(404).send('.'));
   
-  app.listen(CONFIG.PORT, () => {
+  const server = app.listen(CONFIG.PORT, () => {
     sysLog('web', `Web server listening on port ${CONFIG.PORT}`);
   });
+
+  // [OPTIMIZATION] Graceful Shutdown for Containers
+  const cleanup = () => {
+    console.log('\n\x1b[33m[SYS] Stopping services...\x1b[0m');
+    if (global.SB_PID) try { process.kill(global.SB_PID, 'SIGTERM'); } catch(e){}
+    if (global.KM_PID) try { process.kill(global.KM_PID, 'SIGTERM'); } catch(e){}
+    server.close();
+    process.exit(0);
+  };
+  process.on('SIGINT', cleanup);
+  process.on('SIGTERM', cleanup);
 
   try {
     sysLog('sys', 'Starting system initialization...');
