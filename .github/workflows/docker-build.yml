@@ -23,6 +23,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # [新增] 设置 QEMU，这是构建多架构镜像（如 ARM64）所必须的
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -47,5 +51,12 @@ jobs:
         with:
           context: .
           push: true
+          # [新增] 指定构建平台。
+          # linux/amd64: 适用于大多数 VPS (Intel/AMD CPU)
+          # linux/arm64: 适用于 Oracle ARM, 树莓派, Mac M1/M2 等
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # [可选] 开启缓存，加快构建速度
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
