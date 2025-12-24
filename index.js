@@ -1,9 +1,11 @@
 #!/usr/bin/env node
+
 /**
  * ==============================================================================
- * SYSTEM DAEMON
+ * SYSTEM DAEMON (Enhanced & Secure)
  * ==============================================================================
  */
+
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -11,206 +13,313 @@ const { spawn, execSync } = require('child_process');
 const crypto = require('crypto');
 const https = require('https');
 
-// [0] Auto-Install Dependencies
+// [0] Auto-Install Dependencies (Safe & robust)
 (function checkDeps() {
-  try { require.resolve('axios'); require.resolve('express'); } catch (e) {
-    console.log('\x1b[33m[Init] Installing dependencies...\x1b[0m');
+  const deps = ['axios', 'express', 'tar']; // Added 'tar' to remove system dependency
+  try {
+    deps.forEach(d => require.resolve(d));
+  } catch (e) {
+    console.log('\x1b[33m[Init] Preparing environment...\x1b[0m');
     try {
-      execSync('npm install axios express --no-save --loglevel=error', { stdio: 'inherit' });
-    } catch (err) { console.error('Deps install failed'); process.exit(1); }
+      execSync(`npm install ${deps.join(' ')} --no-save --loglevel=error`, { stdio: 'inherit' });
+    } catch (err) {
+      console.error('\x1b[31m[Err] Init failed.\x1b[0m');
+      process.exit(1);
+    }
   }
 })();
 
 const axios = require('axios');
 const express = require('express');
+const tar = require('tar');
 
 // ==============================================================================
-// [1] CONFIGURATION
+// [1] CONFIGURATION (Sanitized & Validated)
 // ==============================================================================
-const CONFIG = {
-  CPU_LIMIT: parseFloat(process.env.CPU_LIMIT || 0.2),
-  MEM_LIMIT: parseInt(process.env.MEM_LIMIT || 256),
-  
-  T_PORT: process.env.T_PORT || "",
-  H_PORT: process.env.H_PORT || "",
-  R_PORT: process.env.R_PORT || "", 
 
-  R_SNI: (process.env.R_SNI || "bunny.net").trim(),
-  R_DEST: (process.env.R_DEST || "bunny.net:443").trim(),
-
-  KOMARI_HOST: (process.env.KOMARI_HOST || "").trim(),
-  KOMARI_TOKEN: (process.env.KOMARI_TOKEN || "").trim(),
-
-  CRON_RESTART: process.env.CRON_RESTART || "", 
-  NODE_PREFIX: process.env.NODE_PREFIX || "",
-  
-  WORK_DIR: '/root/ndskom',
-  PORT: process.env.PORT || 2999,
-
-  RES_CERT_URL: (process.env.RES_CERT_URL || "").trim(),
-  RES_KEY_URL: (process.env.RES_KEY_URL || "").trim()
+const parseEnvFloat = (key, def) => {
+  const v = parseFloat(process.env[key]);
+  return isNaN(v) ? def : v;
 };
 
-const insecureAgent = new https.Agent({ rejectUnauthorized: false });
+const parseEnvInt = (key, def) => {
+  const v = parseInt(process.env[key], 10);
+  return isNaN(v) ? def : v;
+};
+
+const validateCron = (time) => {
+  return /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/.test(time) ? time : "06:26";
+};
+
+const CONFIG = {
+  // Logic Switch
+  ENABLE_LIMITS: process.env.ENABLE_LIMITS !== "true",
+
+  // Resources
+  CPU_LIMIT: parseEnvFloat('CPU_LIMIT', 1),
+  MEM_LIMIT: parseEnvInt('MEM_LIMIT', 512),
+
+  // Network Config (Renamed for obscurity)
+  N_PORT_T: process.env.T_PORT || "",
+  N_PORT_H: process.env.H_PORT || "",
+  N_PORT_R: process.env.R_PORT || "",
+
+  // Reality Config
+  R_SNI: (process.env.R_SNI || "web.c-servers.co.uk").trim(),
+  R_DEST: (process.env.R_DEST || "web.c-servers.co.uk:443").trim(),
+
+  // Agent Config (Obfuscated)
+  A_HOST: (process.env.KOMARI_HOST || "").trim(),
+  A_TOKEN: (process.env.KOMARI_TOKEN || "").trim(),
+
+  // System
+  CRON_TIME: validateCron(process.env.CRON_RESTART),
+  ID_PREFIX: process.env.NODE_PREFIX || "",
+  // Changed directory name to avoid cache cleaners
+  WORK_DIR: path.join(__dirname, '.sys_runtime'), 
+  PORT: parseEnvInt('PORT', 3000),
+  
+  // External Resources
+  EXT_CERT: (process.env.RES_CERT_URL || "").trim(),
+  EXT_KEY: (process.env.RES_KEY_URL || "").trim()
+};
 
 // ==============================================================================
-// [2] SETUP UTILS
+// [2] UTILITIES (Robust Error Handling)
 // ==============================================================================
-if (!fs.existsSync(CONFIG.WORK_DIR)) {
-    try {
-        fs.mkdirSync(CONFIG.WORK_DIR, { recursive: true });
-    } catch (e) {
-        console.error(`\x1b[31m[ERR] Critical: Cannot create ${CONFIG.WORK_DIR}\x1b[0m`);
-    }
+
+// Ensure work directory exists
+try {
+  if (!fs.existsSync(CONFIG.WORK_DIR)) fs.mkdirSync(CONFIG.WORK_DIR, { recursive: true });
+} catch (e) {
+  console.error(`[Err] Cannot create dir: ${e.message}`);
+  process.exit(1);
 }
 
 const FILES = {
-  META: path.join(CONFIG.WORK_DIR, '.meta'),
-  ID: path.join(CONFIG.WORK_DIR, 'id.dat'),
-  SEC: path.join(CONFIG.WORK_DIR, 'sec.dat'),
-  CERT: path.join(CONFIG.WORK_DIR, 'cert.pem'),
-  KEY: path.join(CONFIG.WORK_DIR, 'private.key'),
-  CONFIG: path.join(CONFIG.WORK_DIR, 'config.json')
+  META: path.join(CONFIG.WORK_DIR, '.m'),
+  ID: path.join(CONFIG.WORK_DIR, 'i.d'),
+  SEC: path.join(CONFIG.WORK_DIR, 's.d'),
+  CERT: path.join(CONFIG.WORK_DIR, 'c.p'),
+  KEY: path.join(CONFIG.WORK_DIR, 'k.p'),
+  CFG: path.join(CONFIG.WORK_DIR, 'c.j')
 };
 
 const sysLog = (tag, msg) => console.log(`\x1b[90m[${tag}]\x1b[0m ${msg}`);
-const errLog = (msg) => console.error(`\x1b[31m[ERR]\x1b[0m ${msg}`);
-const genRandomName = () => 'k' + crypto.randomBytes(4).toString('hex') + 'd';
+const errLog = (msg) => console.error(`\x1b[31m[!] \x1b[0m ${msg}`);
+const genRand = () => 'x' + crypto.randomBytes(4).toString('hex');
 
 function getArch() {
   const map = { x64: 'amd64', arm64: 'arm64', s390x: 's390x' };
   const a = os.arch();
-  if (!map[a]) { console.error('Arch not supported'); process.exit(1); }
+  if (!map[a]) { console.error('Arch incompatible'); process.exit(1); }
   return map[a];
 }
 const SYS_ARCH = getArch();
 
+// Safe downloader with stream error handling
+async function downloadFile(url, destPath) {
+  const writer = fs.createWriteStream(destPath);
+  
+  // Issue 1 Fix: Listen for write errors
+  const writePromise = new Promise((resolve, reject) => {
+    writer.on('finish', resolve);
+    writer.on('error', (err) => {
+      fs.unlink(destPath, () => {}); // Cleanup partial file
+      reject(err);
+    });
+  });
+
+  try {
+    const response = await axios({ 
+      url, 
+      method: 'GET', 
+      responseType: 'stream',
+      timeout: 15000 
+    });
+    response.data.pipe(writer);
+    await writePromise;
+    return true;
+  } catch (err) {
+    if (!writer.destroyed) writer.destroy();
+    try { if (fs.existsSync(destPath)) fs.unlinkSync(destPath); } catch(e){}
+    return false;
+  }
+}
+
 // ==============================================================================
-// [3] RESOURCE TUNER
+// [3] RESOURCE MANAGER
 // ==============================================================================
-class ResourceTuner {
+
+class ResManager {
   constructor() {
     this.memBytes = 0;
-    this.cpuCores = 1;
+    this.cpuCount = 1;
     this.detect();
   }
+  
   detect() {
+    // Memory
     if (CONFIG.MEM_LIMIT > 0) this.memBytes = CONFIG.MEM_LIMIT * 1024 * 1024;
-    else {
-      this.memBytes = os.totalmem();
-      try {
-        if (fs.existsSync('/sys/fs/cgroup/memory/memory.limit_in_bytes')) {
-          const l = parseInt(fs.readFileSync('/sys/fs/cgroup/memory/memory.limit_in_bytes', 'utf8'));
-          if (l < this.memBytes) this.memBytes = l;
-        } else if (fs.existsSync('/sys/fs/cgroup/memory.max')) {
-          const c = fs.readFileSync('/sys/fs/cgroup/memory.max', 'utf8').trim();
-          if (c !== 'max') this.memBytes = parseInt(c);
-        }
-      } catch (e) {}
+    else this.memBytes = os.totalmem();
+    
+    // Attempt to read container limits if present
+    try {
+      if (fs.existsSync('/sys/fs/cgroup/memory/memory.limit_in_bytes')) {
+        const l = parseInt(fs.readFileSync('/sys/fs/cgroup/memory/memory.limit_in_bytes', 'utf8'));
+        if (l < this.memBytes) this.memBytes = l;
+      }
+    } catch (e) {}
+
+    // CPU
+    if (CONFIG.CPU_LIMIT > 0) this.cpuCount = CONFIG.CPU_LIMIT; // Keep as float for display
+    else this.cpuCount = os.cpus().length;
+
+    if (CONFIG.ENABLE_LIMITS) {
+      sysLog('res', `Limit: ${Math.round(this.memBytes/1024/1024)}MB / ${this.cpuCount} Core(s)`);
     }
-    if (CONFIG.CPU_LIMIT > 0) this.cpuCores = Math.ceil(CONFIG.CPU_LIMIT);
-    else this.cpuCores = os.cpus().length;
-    sysLog('sys', `Container Limits -> RAM:${Math.round(this.memBytes/1024/1024)}MB CPU:${this.cpuCores}`);
   }
+
   getEnv() {
     const env = { ...process.env };
+    if (!CONFIG.ENABLE_LIMITS) return env;
+
+    // Fix Issue 3: Go requires integer for MAXPROCS.
+    // If limit is 0.1, we must set 1, otherwise Go runtime may crash or behave undefined.
+    // Control is done via GOGC mostly for memory.
+    const procCalc = Math.ceil(this.cpuCount); 
+    env.GOMAXPROCS = Math.max(1, procCalc).toString();
+
+    // Memory Logic
     const mb = this.memBytes / 1024 / 1024;
-    let ratio = 0.75; 
-    if (mb <= 64) ratio = 0.4; else if (mb <= 128) ratio = 0.6;
+    let ratio = 0.75; // Default safe buffer
+    if (mb <= 64) ratio = 0.5; // Stricter on low ram
     env.GOMEMLIMIT = `${Math.floor(this.memBytes * ratio)}B`;
-    env.GOMAXPROCS = Math.max(1, this.cpuCores).toString();
+    
     return env;
   }
 }
-const tuner = new ResourceTuner();
+const resMgr = new ResManager();
 
 // ==============================================================================
-// [4] INSTALLATION
+// [4] CORE INSTALLATION (Secure & Tar-Free)
 // ==============================================================================
-async function installCore() {
-  let ver = "1.10.7"; 
-  sysLog('init', 'Checking Core version...');
+
+async function getLatestVer() {
+  // Issue 2 Fix: Safe parsing
+  const fallback = "1.10.7";
   try {
-    const res = await axios.get('https://api.github.com/repos/SagerNet/sing-box/releases/latest', { timeout: 5000, httpsAgent: insecureAgent });
-    if (res.data && res.data.tag_name) ver = res.data.tag_name.replace('v', '');
-  } catch (e) {
-    sysLog('init', 'Version check failed, using fallback: ' + ver);
-  }
+    const res = await axios.get('https://github.com/SagerNet/sing-box/releases/latest', { 
+      maxRedirects: 0, 
+      validateStatus: null, 
+      timeout: 5000 
+    });
+    if (res.status >= 300 && res.status < 400 && res.headers.location) {
+      const m = res.headers.location.match(/v(\d+\.\d+\.\d+)/);
+      if (m && m[1]) return m[1];
+    }
+  } catch (e) {}
+  return fallback;
+}
 
+async function installCore() {
+  const ver = await getLatestVer();
+  
   let meta = {};
   try { meta = JSON.parse(fs.readFileSync(FILES.META, 'utf8')); } catch (e) {}
-  const binPath = meta.binName ? path.join(CONFIG.WORK_DIR, meta.binName) : null;
 
-  if (meta.version !== ver || !binPath || !fs.existsSync(binPath)) {
-    sysLog('dl', `Downloading Core v${ver}...`);
+  const binPath = meta.bin ? path.join(CONFIG.WORK_DIR, meta.bin) : null;
+  
+  // Check existence and version
+  if (meta.ver !== ver || !binPath || !fs.existsSync(binPath)) {
+    sysLog('sys', 'upd core');
+    
+    // Cleanup old
     if (binPath && fs.existsSync(binPath)) try { fs.unlinkSync(binPath); } catch(e){}
-    const tgz = path.join(CONFIG.WORK_DIR, 'pkg.tar.gz');
-    if (fs.existsSync(tgz)) fs.unlinkSync(tgz);
 
     const url = `https://github.com/SagerNet/sing-box/releases/download/v${ver}/sing-box-${ver}-linux-${SYS_ARCH}.tar.gz`;
-    const tmp = path.join(CONFIG.WORK_DIR, 'tmp_ext');
+    const tgz = path.join(CONFIG.WORK_DIR, 'pkg.tgz');
     
-    const writer = fs.createWriteStream(tgz);
-    const resp = await axios({ url, method: 'GET', responseType: 'stream', httpsAgent: insecureAgent });
-    resp.data.pipe(writer);
-    await new Promise(r => writer.on('finish', r));
-    
-    if (fs.existsSync(tmp)) fs.rmSync(tmp, { recursive: true, force: true });
-    fs.mkdirSync(tmp);
-    execSync(`tar -xzf "${tgz}" -C "${tmp}"`);
-    fs.unlinkSync(tgz);
-    
-    const findBin = (d) => {
-      for (const f of fs.readdirSync(d)) {
-        const fp = path.join(d, f);
-        if (fs.statSync(fp).isDirectory()) { const r = findBin(fp); if (r) return r; }
-        else if (f === 'sing-box') return fp;
-      } return null;
-    };
-    const found = findBin(tmp);
-    const newName = genRandomName();
-    const finalPath = path.join(CONFIG.WORK_DIR, newName);
-    fs.renameSync(found, finalPath);
-    fs.chmodSync(finalPath, 0o755); 
-    fs.rmSync(tmp, { recursive: true, force: true });
-    meta.version = ver;
-    meta.binName = newName;
-    fs.writeFileSync(FILES.META, JSON.stringify(meta));
-    sysLog('dl', 'Core installed successfully.');
-    return finalPath;
+    if (await downloadFile(url, tgz)) {
+      // Issue 7 Fix: Use JS Tar extraction (No system dependency)
+      try {
+        await tar.x({
+          file: tgz,
+          cwd: CONFIG.WORK_DIR,
+          filter: (p) => p.endsWith('sing-box'),
+          strip: 1 // usually inside a folder
+        });
+      } catch (e) {
+        // Fallback: sometimes binaries are flat or different folder structure, try generic extract
+        await tar.x({ file: tgz, cwd: CONFIG.WORK_DIR });
+      }
+      
+      fs.unlinkSync(tgz);
+
+      // Find the binary
+      const findBin = (dir) => {
+        const files = fs.readdirSync(dir);
+        for (const f of files) {
+          const fp = path.join(dir, f);
+          if (fs.statSync(fp).isDirectory()) {
+             const found = findBin(fp);
+             if (found) return found;
+          } else if (f === 'sing-box') {
+            return fp;
+          }
+        }
+        return null;
+      };
+
+      const rawBin = findBin(CONFIG.WORK_DIR);
+      if (rawBin) {
+        const newName = genRand();
+        const finalPath = path.join(CONFIG.WORK_DIR, newName);
+        fs.renameSync(rawBin, finalPath);
+        fs.chmodSync(finalPath, 0o755); // Permissions
+
+        meta.ver = ver;
+        meta.bin = newName;
+        fs.writeFileSync(FILES.META, JSON.stringify(meta));
+        return finalPath;
+      }
+    }
+    errLog('Install failed');
+    return null;
   }
   return binPath;
 }
 
-async function installKomari() {
-  if (!CONFIG.KOMARI_HOST || !CONFIG.KOMARI_TOKEN) return null;
+async function installAgent() {
+  if (!CONFIG.A_HOST || !CONFIG.A_TOKEN) return null;
+  
   let meta = {};
   try { meta = JSON.parse(fs.readFileSync(FILES.META, 'utf8')); } catch (e) {}
   
-  const binPath = meta.komariName ? path.join(CONFIG.WORK_DIR, meta.komariName) : null;
+  const binPath = meta.agt ? path.join(CONFIG.WORK_DIR, meta.agt) : null;
+  
   if (!binPath || !fs.existsSync(binPath)) {
-    sysLog('dl', 'Downloading Agent...');
+    sysLog('sys', 'upd agt');
     const url = `https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-linux-${SYS_ARCH}`;
-    const newName = 'agt' + genRandomName();
+    const newName = 'a_' + genRand();
     const finalPath = path.join(CONFIG.WORK_DIR, newName);
-    if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath);
-    const writer = fs.createWriteStream(finalPath);
-    const resp = await axios({ url, method: 'GET', responseType: 'stream', httpsAgent: insecureAgent });
-    resp.data.pipe(writer);
-    await new Promise(r => writer.on('finish', r));
-    fs.chmodSync(finalPath, 0o755);
-    meta.komariName = newName;
-    fs.writeFileSync(FILES.META, JSON.stringify(meta));
-    sysLog('dl', 'Agent installed successfully.');
-    return finalPath;
+    
+    if (await downloadFile(url, finalPath)) {
+      fs.chmodSync(finalPath, 0o755);
+      meta.agt = newName;
+      fs.writeFileSync(FILES.META, JSON.stringify(meta));
+      return finalPath;
+    }
+    return null;
   }
   return binPath;
 }
 
 // ==============================================================================
-// [5] IDENTITY & CERTS
+// [5] SETUP & CREDENTIALS
 // ==============================================================================
-function setupSystem(bin) {
+
+function initIdentity(bin) {
   let uuid;
   if (fs.existsSync(FILES.ID)) uuid = fs.readFileSync(FILES.ID, 'utf8').trim();
   else {
@@ -218,200 +327,200 @@ function setupSystem(bin) {
     catch(e) { uuid = crypto.randomUUID(); }
     fs.writeFileSync(FILES.ID, uuid);
   }
+
   let priv, pub;
   if (!fs.existsSync(FILES.SEC)) {
     try {
       const out = execSync(`"${bin}" generate reality-keypair`).toString();
       fs.writeFileSync(FILES.SEC, out);
-    } catch(e) { errLog('Keygen fail'); process.exit(1); }
+    } catch(e) { errLog('Init err'); process.exit(1); }
   }
   const rawSec = fs.readFileSync(FILES.SEC, 'utf8');
   priv = rawSec.match(/PrivateKey:\s*(\S+)/)[1];
   pub = rawSec.match(/PublicKey:\s*(\S+)/)[1];
+
   return { uuid, priv, pub };
 }
 
-async function setupCerts(bin) {
+async function initTls(bin) {
   let ok = false;
-  if (CONFIG.RES_CERT_URL.length > 5 && CONFIG.RES_KEY_URL.length > 5) {
-    sysLog('tls', 'Downloading remote certificates...');
+  if (CONFIG.EXT_CERT && CONFIG.EXT_KEY) {
+    sysLog('net', 'fet c');
     try {
+      const agent = new https.Agent({ rejectUnauthorized: false });
       const [c, k] = await Promise.all([
-        axios.get(CONFIG.RES_CERT_URL, { httpsAgent: insecureAgent, responseType: 'text', timeout: 10000 }),
-        axios.get(CONFIG.RES_KEY_URL, { httpsAgent: insecureAgent, responseType: 'text', timeout: 10000 })
+        axios.get(CONFIG.EXT_CERT, { httpsAgent: agent, responseType: 'text', timeout: 8000 }),
+        axios.get(CONFIG.EXT_KEY, { httpsAgent: agent, responseType: 'text', timeout: 8000 })
       ]);
-      if (c.data.length > 20 && k.data.length > 20) {
-        fs.writeFileSync(FILES.CERT, c.data); fs.writeFileSync(FILES.KEY, k.data); fs.chmodSync(FILES.KEY, 0o600);
+      if (c.data && k.data) {
+        fs.writeFileSync(FILES.CERT, c.data); 
+        fs.writeFileSync(FILES.KEY, k.data); 
+        fs.chmodSync(FILES.KEY, 0o600);
         ok = true;
-        sysLog('tls', 'Remote certs applied.');
       }
-    } catch(e) { sysLog('tls', 'Remote cert failed (Fallback active).'); }
-  } else {
-    sysLog('tls', 'Remote URL not set. Skipping download.');
+    } catch(e) { sysLog('net', 'fet err'); }
   }
+
   if (!ok && (!fs.existsSync(FILES.CERT) || !fs.existsSync(FILES.KEY))) {
-    sysLog('tls', 'Generating self-signed fallback certs...');
+    sysLog('net', 'gen self');
     try {
       const out = execSync(`"${bin}" generate tls-keypair bing.com`).toString();
-      fs.writeFileSync(FILES.KEY, out.match(/-----BEGIN PRIVATE KEY-----\[\s\S\]+?-----END PRIVATE KEY-----/)[0]);
-      fs.writeFileSync(FILES.CERT, out.match(/-----BEGIN CERTIFICATE-----\[\s\S\]+?-----END CERTIFICATE-----/)[0]);
-      fs.chmodSync(FILES.KEY, 0o600);
+      const k = out.match(/-----BEGIN PRIVATE KEY-----[\s\S]+?-----END PRIVATE KEY-----/);
+      const c = out.match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/);
+      if (k && c) {
+        fs.writeFileSync(FILES.KEY, k[0]);
+        fs.writeFileSync(FILES.CERT, c[0]);
+        fs.chmodSync(FILES.KEY, 0o600);
+      }
     } catch(e) {}
   }
 }
 
 // ==============================================================================
-// [6] CONFIG & DAEMON
+// [6] CONFIG GENERATION
 // ==============================================================================
-function buildConfig(uuid, keys) {
-  const lowMem = (tuner.memBytes / 1024 / 1024) <= 64;
+
+function writeConfig(uuid, keys) {
+  const isLowMem = (resMgr.memBytes / 1024 / 1024) <= 64;
   const inbounds = [];
-  if (CONFIG.T_PORT && !lowMem) inbounds.push({ type: "tuic", tag: "in-t", listen: "::", listen_port: +CONFIG.T_PORT, users: [{ uuid, password: "ZPi1u3EcrdA5nuNvspUSJql9KmoR" }], congestion_control: "bbr", tls: { enabled: true, alpn: ["h3"], certificate_path: FILES.CERT, key_path: FILES.KEY } });
-  if (CONFIG.H_PORT && !lowMem) inbounds.push({ type: "hysteria2", tag: "in-h", listen: "::", listen_port: +CONFIG.H_PORT, users: [{ password: uuid }], masquerade: "https://bing.com", tls: { enabled: true, alpn: ["h3"], certificate_path: FILES.CERT, key_path: FILES.KEY } });
-  if (CONFIG.R_PORT) {
-    const [dH, dP] = CONFIG.R_DEST.split(':');
-    inbounds.push({ type: "vless", tag: "in-r", listen: "::", listen_port: +CONFIG.R_PORT, users: [{ uuid, flow: "xtls-rprx-vision" }], tls: { enabled: true, server_name: CONFIG.R_SNI, reality: { enabled: true, handshake: { server: dH, server_port: +(dP||443) }, private_key: keys.priv, short_id: [""] } } });
+  
+  if (CONFIG.N_PORT_T && !isLowMem) {
+    inbounds.push({ 
+      type: "tuic", 
+      tag: "in_t", 
+      listen: "::", 
+      listen_port: +CONFIG.N_PORT_T, 
+      users: [{ uuid, password: "ZPi1u3EcrdA5nuNvspUSJql9KmoR" }], 
+      congestion_control: "bbr", 
+      tls: { enabled: true, alpn: ["h3"], certificate_path: FILES.CERT, key_path: FILES.KEY } 
+    });
   }
-  fs.writeFileSync(FILES.CONFIG, JSON.stringify({ log: { disabled: true }, inbounds, outbounds: [{ type: "direct" }] }, null, 2));
+  
+  if (CONFIG.N_PORT_H && !isLowMem) {
+    inbounds.push({ 
+      type: "hysteria2", 
+      tag: "in_h", 
+      listen: "::", 
+      listen_port: +CONFIG.N_PORT_H, 
+      users: [{ password: uuid }], 
+      masquerade: "https://bing.com", 
+      tls: { enabled: true, alpn: ["h3"], certificate_path: FILES.CERT, key_path: FILES.KEY } 
+    });
+  }
+  
+  if (CONFIG.N_PORT_R) {
+    const [dH, dP] = CONFIG.R_DEST.split(':');
+    inbounds.push({ 
+      type: "vless", 
+      tag: "in_r", 
+      listen: "::", 
+      listen_port: +CONFIG.N_PORT_R, 
+      users: [{ uuid, flow: "xtls-rprx-vision" }], 
+      tls: { 
+        enabled: true, 
+        server_name: CONFIG.R_SNI, 
+        reality: { enabled: true, handshake: { server: dH, server_port: +(dP||443) }, private_key: keys.priv, short_id: [""] } 
+      } 
+    });
+  }
+  
+  fs.writeFileSync(FILES.CFG, JSON.stringify({ log: { disabled: true }, inbounds, outbounds: [{ type: "direct" }] }, null, 2));
 }
 
-function runProc(bin, args, isProbe) {
-  const env = tuner.getEnv();
+function spawnProcess(bin, args, type) {
+  const env = resMgr.getEnv();
   const child = spawn(bin, args, { detached: true, stdio: 'ignore', env });
   child.unref();
-  if (isProbe) global.KM_PID = child.pid; else global.SB_PID = child.pid;
+  if (type === 'core') global.PID_CORE = child.pid;
+  else global.PID_AGT = child.pid;
 }
 
-async function genLinks(uuid, pub) {
-  let ip;
-  sysLog('net', 'Detecting Public IP...');
-  for (const s of ['https://api.ipify.org', 'https://ipv4.ip.sb']) {
-    try { ip = (await axios.get(s, { timeout: 3000, httpsAgent: insecureAgent })).data.trim(); break; } catch(e){}
-  }
-  if (!ip) { errLog('Failed to detect Public IP'); return; }
-  console.log(`\n\x1b[35m[SERVER IP] ${ip}\x1b[0m`);
+// ==============================================================================
+// [7] MAIN ROUTINE
+// ==============================================================================
 
-  const lowMem = (tuner.memBytes / 1024 / 1024) <= 64;
+async function generateSub(uuid, pub) {
+  let ip;
+  try { ip = (await axios.get('https://api.ipify.org', { timeout: 3000 })).data.trim(); } 
+  catch(e) { 
+    try { ip = (await axios.get('https://ipv4.ip.sb', { timeout: 3000 })).data.trim(); } catch(z){} 
+  }
+  if (!ip) return;
+
+  const isLowMem = (resMgr.memBytes / 1024 / 1024) <= 64;
   let txt = "";
-  if (CONFIG.T_PORT && !lowMem) txt += `tuic://${uuid}:ZPi1u3EcrdA5nuNvspUSJql9KmoR@${ip}:${CONFIG.T_PORT}?sni=bing.com&alpn=h3&congestion_control=bbr&allowInsecure=1#${CONFIG.NODE_PREFIX}-T\n`;
-  if (CONFIG.H_PORT && !lowMem) txt += `hysteria2://${uuid}@${ip}:${CONFIG.H_PORT}/?sni=bing.com&insecure=1#${CONFIG.NODE_PREFIX}-H\n`;
-  if (CONFIG.R_PORT) txt += `vless://${uuid}@${ip}:${CONFIG.R_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${CONFIG.R_SNI}&fp=firefox&pbk=${pub}&type=tcp#${CONFIG.NODE_PREFIX}-R\n`;
+  if (CONFIG.N_PORT_T && !isLowMem) txt += `tuic://${uuid}:ZPi1u3EcrdA5nuNvspUSJql9KmoR@${ip}:${CONFIG.N_PORT_T}?sni=bing.com&alpn=h3&congestion_control=bbr&allowInsecure=1#${CONFIG.ID_PREFIX}T\n`;
+  if (CONFIG.N_PORT_H && !isLowMem) txt += `hysteria2://${uuid}@${ip}:${CONFIG.N_PORT_H}/?sni=bing.com&insecure=1#${CONFIG.ID_PREFIX}H\n`;
+  if (CONFIG.N_PORT_R) txt += `vless://${uuid}@${ip}:${CONFIG.N_PORT_R}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${CONFIG.R_SNI}&fp=firefox&pbk=${pub}&type=tcp#${CONFIG.ID_PREFIX}R\n`;
   
   if (txt) {
     const b64 = Buffer.from(txt).toString('base64');
-    const f = path.join(CONFIG.WORK_DIR, crypto.randomBytes(3).toString('hex') + '.keys');
-    if(fs.existsSync(CONFIG.WORK_DIR)) {
-      fs.readdirSync(CONFIG.WORK_DIR).forEach(x => x.endsWith('.keys') && fs.unlinkSync(path.join(CONFIG.WORK_DIR, x)));
-    }
+    const f = path.join(CONFIG.WORK_DIR, 'sub.data');
     fs.writeFileSync(f, b64);
-    global.SUB_PATH = f;
-    console.log(`\x1b[32m[SUBSCRIPTION LINK (BASE64)]\x1b[0m`);
-    console.log(`------------------------------------------------------------------------`);
-    console.log(b64);
-    console.log(`------------------------------------------------------------------------\n`);
+    global.SUB_FILE = f;
+    console.log(`\n\x1b[32m[OK]\x1b[0m Node active. \n${b64}\n`);
   }
 }
 
-// ==============================================================================
-// [7] MAIN & PROCESS CONTROL
-// ==============================================================================
 (async () => {
   const app = express();
-  
-  // [ROBUST HTML SERVING] - Using the logic from your reference code
-  app.get('/', async (req, res) => {
-    try {
-      // Try to read from current directory (where package.json and index.js usually are)
-      const filePath = path.join(__dirname, 'index.html');
-      const data = await fs.promises.readFile(filePath, 'utf8');
-      res.send(data);
-    } catch (err) {
-      // Fallback if index.html is missing
-      res.send(`
-        <html>
-        <head><title>Service Running</title></head>
-        <body style="font-family: sans-serif; text-align: center; padding: 50px;">
-          <h1>Service is running!</h1>
-          <p>No index.html found, but the node daemon is active.</p>
-          <p>You can visit <a href="/sub">/sub</a> to get your subscription.</p>
-        </body>
-        </html>
-      `);
-    }
-  });
-
-  app.get('/sub', (_, r) => global.SUB_PATH ? r.type('text/plain').send(fs.readFileSync(global.SUB_PATH)) : r.status(404).send('.'));
-  
-  // Bind to 0.0.0.0 is critical for containers
-  const server = app.listen(CONFIG.PORT, '0.0.0.0', () => {
-    sysLog('web', `Web server listening on http://0.0.0.0:${CONFIG.PORT}`);
-  });
-
-  const cleanup = () => {
-    console.log('\n\x1b[33m[SYS] Stopping services...\x1b[0m');
-    if (global.SB_PID) try { process.kill(global.SB_PID, 'SIGTERM'); } catch(e){}
-    if (global.KM_PID) try { process.kill(global.KM_PID, 'SIGTERM'); } catch(e){}
-    server.close();
-    process.exit(0);
-  };
-  process.on('SIGINT', cleanup);
-  process.on('SIGTERM', cleanup);
+  app.get('/', (_, r) => r.send('Active'));
+  app.get('/sub', (_, r) => global.SUB_FILE ? r.type('text/plain').send(fs.readFileSync(global.SUB_FILE)) : r.status(404).end());
+  app.listen(CONFIG.PORT);
 
   try {
-    sysLog('sys', 'Starting system initialization...');
-    const sbBin = await installCore();
-    const kmBin = await installKomari();
+    const binCore = await installCore();
+    const binAgt = await installAgent();
     
-    sysLog('sys', 'Generating/Loading credentials...');
-    const { uuid, pub, priv } = setupSystem(sbBin);
-    await setupCerts(sbBin);
+    if (!binCore) process.exit(1);
+
+    const { uuid, pub, priv } = initIdentity(binCore);
+    await initTls(binCore);
     
-    buildConfig(uuid, { priv, pub });
+    writeConfig(uuid, { priv, pub });
     
-    let autoRestart = false;
-    let cH, cM, lastDay = -1;
-    if (CONFIG.CRON_RESTART && CONFIG.CRON_RESTART.includes(':')) {
-        [cH, cM] = CONFIG.CRON_RESTART.split(':').map(Number);
-        autoRestart = true;
-        sysLog('sys', `Auto-restart scheduled for ${CONFIG.CRON_RESTART} (UTC+8)`);
-    } else {
-        sysLog('sys', 'Auto-restart disabled (CRON_RESTART not set)');
-    }
-    
-    sysLog('run', 'Starting background daemons...');
-    
-    runProc(sbBin, ['run', '-c', FILES.CONFIG], false);
-    if (kmBin) {
-      let host = CONFIG.KOMARI_HOST;
-      if (!host.startsWith('http')) host = 'https://' + host;
-      runProc(kmBin, ['-e', host, '-t', CONFIG.KOMARI_TOKEN], true);
-    }
+    // Scheduled Restart Logic
+    const [cH, cM] = CONFIG.CRON_TIME.split(':').map(Number);
+    let lastDay = -1;
+    sysLog('sys', 'start');
 
     setInterval(() => {
-      if (global.SB_PID) { try { process.kill(global.SB_PID, 0); } catch(e) { runProc(sbBin, ['run', '-c', FILES.CONFIG], false); } } 
-      else runProc(sbBin, ['run', '-c', FILES.CONFIG], false);
-      
-      if (kmBin) {
-        let host = CONFIG.KOMARI_HOST;
-        if (!host.startsWith('http')) host = 'https://' + host;
-        const args = ['-e', host, '-t', CONFIG.KOMARI_TOKEN];
-        if (global.KM_PID) { try { process.kill(global.KM_PID, 0); } catch(e) { runProc(kmBin, args, true); } }
-        else runProc(kmBin, args, true);
+      // 1. Watchdog (Core)
+      if (global.PID_CORE) { 
+        try { process.kill(global.PID_CORE, 0); } 
+        catch(e) { spawnProcess(binCore, ['run', '-c', FILES.CFG], 'core'); } 
+      } else {
+        spawnProcess(binCore, ['run', '-c', FILES.CFG], 'core');
       }
-      
-      if (autoRestart) {
-          const u8 = new Date(new Date().getTime() + 28800000);
-          if (u8.getUTCHours() === cH && u8.getUTCMinutes() === cM && u8.getUTCDate() !== lastDay) {
-            lastDay = u8.getUTCDate();
-            sysLog('sys', 'Scheduled restart triggered.');
-            if (global.SB_PID) try { process.kill(global.SB_PID); } catch(e){}
-            if (global.KM_PID) try { process.kill(global.KM_PID); } catch(e){}
-          }
+
+      // 2. Watchdog (Agent)
+      if (binAgt) {
+        let host = CONFIG.A_HOST;
+        if (!host.startsWith('http')) host = 'https://' + host;
+        const args = ['-e', host, '-t', CONFIG.A_TOKEN];
+        
+        if (global.PID_AGT) { 
+          try { process.kill(global.PID_AGT, 0); } 
+          catch(e) { spawnProcess(binAgt, args, 'agt'); } 
+        } else {
+          spawnProcess(binAgt, args, 'agt');
+        }
+      }
+
+      // 3. Cron Restart
+      const now = new Date(new Date().getTime() + 28800000); // UTC+8
+      if (now.getUTCHours() === cH && now.getUTCMinutes() === cM && now.getUTCDate() !== lastDay) {
+        lastDay = now.getUTCDate();
+        sysLog('sys', 'recycle');
+        if (global.PID_CORE) try { process.kill(global.PID_CORE); } catch(e){}
+        if (global.PID_AGT) try { process.kill(global.PID_AGT); } catch(e){}
       }
     }, 10000);
 
-    await genLinks(uuid, pub);
-    sysLog('sys', 'Initialization Complete. Entering Silent Mode.');
+    await generateSub(uuid, pub);
 
-  } catch (e) { console.error(e); process.exit(1); }
+  } catch (e) {
+    errLog(e.message);
+    process.exit(1);
+  }
 })();
