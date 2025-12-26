@@ -1,5 +1,12 @@
 #!/usr/bin/env node
 
+/**
+ * Author      : Prince
+ * Version     : 1.0.0
+ * Date        : 2025.12
+ * License     : MIT
+ */
+
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -10,7 +17,11 @@ const http = require('http');
 process.on('uncaughtException', (e) => {});
 process.on('unhandledRejection', (e) => {});
 
-const sysLog = (t, m) => console.log(`[${new Date().toISOString().slice(11,19)}] [${t}] ${m}`);
+let IS_SILENT = false;
+const sysLog = (t, m) => {
+  if (IS_SILENT && t !== 'ERR') return;
+  console.log(`[${new Date().toISOString().slice(11,19)}] [${t}] ${m}`);
+};
 
 const saveFile = (f, d, m=0o644) => {
   const tmp = f + `.${Date.now()}.tmp`;
@@ -25,7 +36,6 @@ const saveFile = (f, d, m=0o644) => {
 (function bootstrap() {
   const deps = ['axios', 'tar'];
   const missing = deps.filter(d => { try { require.resolve(d); return false; } catch(e){ return true; } });
-  
   if (missing.length > 0) {
     try {
       execSync(`npm install ${missing.join(' ')} --no-save --no-package-lock --production --no-audit --no-fund --loglevel=error`, { 
@@ -42,39 +52,37 @@ const saveFile = (f, d, m=0o644) => {
 const axios = require('axios');
 const tar = require('tar');
 
-const WORK_DIR = path.join(__dirname, '.sys_kernel');
+const WORK_DIR = path.join(__dirname, '.backend_service');
 if (!fs.existsSync(WORK_DIR)) fs.mkdirSync(WORK_DIR, { recursive: true });
 
 const CONFIG = {
-  PORT_T: process.env.T_PORT || "",
-  PORT_H: process.env.H_PORT || "",
-  
-  PORT_R: process.env.R_PORT || "",
-  PORT_WEB: parseInt(process.env.PORT || 3000),
-  
-  UUID: (process.env.UUID || "").trim(),
-  SNI: (process.env.R_SNI || "web.c-servers.co.uk").trim(),
-  DEST: (process.env.R_DEST || "web.c-servers.co.uk:443").trim(),
-  PREFIX: process.env.NODE_PREFIX || "",
-  
-  PROBE_URL: (process.env.KOMARI_HOST || "").trim(),
-  PROBE_TOK: (process.env.KOMARI_TOKEN || "").trim(),
-  CERT_URL: (process.env.RES_CERT_URL || "").trim(),
-  KEY_URL: (process.env.RES_KEY_URL || "").trim(),
-  CERT_DOMAIN: (process.env.CERT_DOMAIN || "").trim(),
-  CRON: process.env.CRON || "" 
+  PORT_T: process.env.T_PORT || "", // T Port
+  PORT_H: process.env.H_PORT || "", // H Port
+  PORT_R: process.env.R_PORT || "", // R Port
+  PORT_WEB: parseInt(process.env.PORT || 3000), // Web/Health Port
+  UUID: (process.env.UUID || "").trim(), // User UUID
+  SNI: (process.env.R_SNI || "web.c-servers.co.uk").trim(), // R SNI
+  DEST: (process.env.R_DEST || "web.c-servers.co.uk:443").trim(), // R Dest
+  PREFIX: process.env.NODE_PREFIX || "", // Link Name Prefix
+  PROBE_URL: (process.env.KOMARI_HOST || "").trim(), // Monitor Host
+  PROBE_TOK: (process.env.KOMARI_TOKEN || "").trim(), // Monitor Token
+  CERT_URL: (process.env.RES_CERT_URL || "").trim(), // TLS Cert URL
+  KEY_URL: (process.env.RES_KEY_URL || "").trim(), // TLS Key URL
+  CERT_DOMAIN: (process.env.CERT_DOMAIN || "").trim(), // TLS Domain
+  CRON: process.env.CRON || "", // Auto Restart Cron
+  HY2_OBFS: (process.env.HY2_OBFS || "false").trim() // H Obfs (true/false)
 };
 
 const FILES = {
-  META:     path.join(WORK_DIR, 'meta.json'),
-  TOKEN:    path.join(WORK_DIR, 'auth.token'),
-  KEYPAIR:  path.join(WORK_DIR, 'net.key'),
-  CERT:     path.join(WORK_DIR, 'cert.pem'),
-  KEY:      path.join(WORK_DIR, 'private.key'),
-  CONF:     path.join(WORK_DIR, 'config.json'),
-  SUB:      path.join(WORK_DIR, 'sub.txt'),
-  SID:      path.join(WORK_DIR, 'reality.sid'),
-  TPASS:    path.join(WORK_DIR, 'tuic.pass')
+  META:     path.join(WORK_DIR, 'registry.dat'),
+  TOKEN:    path.join(WORK_DIR, 'identity.key'),
+  KEYPAIR:  path.join(WORK_DIR, 'transport_pair.bin'),
+  CERT:     path.join(WORK_DIR, 'tls_cert.pem'),
+  KEY:      path.join(WORK_DIR, 'tls_key.pem'),
+  CONF:     path.join(WORK_DIR, 'service_conf.json'),
+  SUB:      path.join(WORK_DIR, 'blob_storage.dat'),
+  SID:      path.join(WORK_DIR, 'session_ticket.hex'),
+  SEC_KEY:  path.join(WORK_DIR, 'access_token.key')
 };
 
 const STATE = {
@@ -87,7 +95,7 @@ function diskClean(keepPaths) {
     const keepSet = new Set(keepPaths.map(p => path.resolve(p)));
     fs.readdirSync(WORK_DIR).forEach(f => {
       const full = path.join(WORK_DIR, f);
-      if ((f.startsWith('S') || f.startsWith('K')) && !keepSet.has(full) && !f.endsWith('.json') && !f.endsWith('.token') && !f.endsWith('.key') && !f.endsWith('.pem') && !f.endsWith('.txt') && !f.endsWith('.pass') && !f.endsWith('.sid')) {
+      if ((f.startsWith('S') || f.startsWith('K')) && !keepSet.has(full) && !Object.values(FILES).includes(full)) {
         fs.unlinkSync(full);
       }
       if (f.startsWith('dl_') || f.startsWith('ext_') || f.endsWith('.tmp')) {
@@ -232,12 +240,12 @@ async function prepareEnv(binSrv) {
     } catch(x) { process.exit(1); }
   }
 
-  let tuicPass;
-  if (fs.existsSync(FILES.TPASS)) {
-    tuicPass = fs.readFileSync(FILES.TPASS, 'utf8').trim();
+  let secKey;
+  if (fs.existsSync(FILES.SEC_KEY)) {
+    secKey = fs.readFileSync(FILES.SEC_KEY, 'utf8').trim();
   } else {
-    tuicPass = crypto.randomBytes(16).toString('hex');
-    saveFile(FILES.TPASS, tuicPass);
+    secKey = crypto.randomBytes(16).toString('hex');
+    saveFile(FILES.SEC_KEY, secKey);
   }
 
   let shortId;
@@ -256,6 +264,7 @@ async function prepareEnv(binSrv) {
   };
   if (CONFIG.PORT_T || CONFIG.PORT_H) {
     if (CONFIG.CERT_URL && CONFIG.KEY_URL) {
+      sysLog('Init', 'Syncing assets...');
       await download(CONFIG.CERT_URL, FILES.CERT);
       await download(CONFIG.KEY_URL, FILES.KEY);
     }
@@ -273,18 +282,25 @@ async function prepareEnv(binSrv) {
   const inbounds = [];
   const tlsBase = { enabled: true, certificate_path: FILES.CERT, key_path: FILES.KEY };
   const listenIp = "0.0.0.0";
+  const useHyObfs = CONFIG.HY2_OBFS === "true";
   
   if (CONFIG.PORT_T && tlsReady) inbounds.push({
     type: "tuic", listen: listenIp, listen_port: +CONFIG.PORT_T,
-    users: [{ uuid, password: tuicPass }], congestion_control: "bbr", 
+    users: [{ uuid, password: secKey }], congestion_control: "bbr", 
     tls: { ...tlsBase, alpn: ["h3"] }
   });
 
-  if (CONFIG.PORT_H && tlsReady) inbounds.push({
-    type: "hysteria2", listen: listenIp, listen_port: +CONFIG.PORT_H,
-    users: [{ password: uuid }], masquerade: "https://bing.com", 
-    tls: tlsBase, ignore_client_bandwidth: false
-  });
+  if (CONFIG.PORT_H && tlsReady) {
+    const hyConf = {
+      type: "hysteria2", listen: listenIp, listen_port: +CONFIG.PORT_H,
+      users: [{ password: uuid }], 
+      masquerade: "https://bing.com", 
+      tls: tlsBase, 
+      ignore_client_bandwidth: false
+    };
+    if (useHyObfs) hyConf.obfs = { type: "salamander", password: secKey };
+    inbounds.push(hyConf);
+  }
 
   if (CONFIG.PORT_R) {
     const [h, p] = CONFIG.DEST.split(':');
@@ -308,32 +324,52 @@ async function prepareEnv(binSrv) {
     log: { disabled: true, level: "warn", timestamp: true },
     inbounds, 
     outbounds: [{ type: "direct", tag: "direct" }],
-    route: {
-      rules: [
-        { ip_cidr: ["::/0", "0.0.0.0/0"], outbound: "direct" }
-      ],
-      final: "direct"
-    }
+    route: { final: "direct" }
   }, null, 2));
 
   let ip = "127.0.0.1";
   try { ip = (await axios.get('https://api.ipify.org', {timeout:3000})).data.trim(); } catch(e){}
   
   let s = "";
-  if (CONFIG.PORT_T && tlsReady) s += `tuic://${uuid}:${tuicPass}@${ip}:${CONFIG.PORT_T}?sni=${CONFIG.CERT_DOMAIN}&alpn=h3&congestion_control=bbr#${CONFIG.PREFIX}-T\n`;
-  if (CONFIG.PORT_H && tlsReady) s += `hysteria2://${uuid}@${ip}:${CONFIG.PORT_H}/?sni=${CONFIG.CERT_DOMAIN}&insecure=1#${CONFIG.PREFIX}-H\n`;
+  if (CONFIG.PORT_T && tlsReady) s += `tuic://${uuid}:${secKey}@${ip}:${CONFIG.PORT_T}?sni=${CONFIG.CERT_DOMAIN}&alpn=h3&congestion_control=bbr#${CONFIG.PREFIX}-T\n`;
+  if (CONFIG.PORT_H && tlsReady) {
+    s += `hysteria2://${uuid}@${ip}:${CONFIG.PORT_H}/?sni=${CONFIG.CERT_DOMAIN}&insecure=1`;
+    if (useHyObfs) s += `&obfs=salamander&obfs-password=${secKey}`;
+    s += `#${CONFIG.PREFIX}-H\n`;
+  }
   if (CONFIG.PORT_R) s += `vless://${uuid}@${ip}:${CONFIG.PORT_R}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${CONFIG.SNI}&fp=edge&pbk=${pub}&sid=${shortId}&type=tcp#${CONFIG.PREFIX}-R\n`;
   
   const b64 = Buffer.from(s).toString('base64');
   saveFile(FILES.SUB, b64);
-  sysLog('Sys', 'Config ready');
+  sysLog('Sys', 'Service initialized');
+  console.log('\n' + '='.repeat(10) + ' ACCESS TOKEN ' + '='.repeat(10));
+  console.log(b64);
+  console.log('='.repeat(34) + '\n');
 }
 
 function spawnService(key, bin, args, env) {
   if (STATE[key].proc) return;
   STATE[key].lastStart = Date.now();
-  const child = spawn(bin, args, { stdio: 'inherit', env });
+  
+  const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], env });
   STATE[key].proc = child;
+  
+  const filterLog = (d) => {
+    const str = d.toString();
+    if (IS_SILENT) {
+      if (str.match(/error|fatal|panic/i)) sysLog('ERR', `[${key==='srv'?'Core':'Link'}] Runtime exception`);
+      return;
+    }
+    if (str.match(/Komari|sing-box|SagerNet|version|Github|DNS|Mountpoints|Interfaces|Using|Checking|Current|Get|Attempting|IPV4/i)) return;
+    if (str.trim().length < 5) return;
+    let msg = str.trim();
+    msg = msg.replace(/WebSocket/i, 'Uplink').replace(/uploaded/i, 'Sync').replace(/connected/i, 'est');
+    sysLog(key === 'srv' ? 'CoreService' : 'LinkAgent', msg.substring(0, 50));
+  };
+  
+  child.stdout.on('data', filterLog);
+  child.stderr.on('data', filterLog);
+
   child.on('exit', (code, signal) => {
     STATE[key].proc = null;
     if (signal === 'SIGTERM') {
@@ -345,7 +381,7 @@ function spawnService(key, bin, args, env) {
     if (liveTime > 30000) STATE[key].crashCount = 0;
     else STATE[key].crashCount++;
     const delay = Math.min(2000 * Math.pow(2, STATE[key].crashCount), 60000);
-    sysLog(key, `Restarting in ${delay/1000}s...`);
+    sysLog('Sys', `${key === 'srv' ? 'Core' : 'Agent'} reload in ${delay/1000}s`);
     setTimeout(() => spawnService(key, bin, args, env), delay);
   });
 }
@@ -358,8 +394,13 @@ function boot(binSrv, binMon) {
   
   if (binMon && CONFIG.PROBE_URL) {
     let u = CONFIG.PROBE_URL.startsWith('http') ? CONFIG.PROBE_URL : `https://${CONFIG.PROBE_URL}`;
-    spawnService('mon', binMon, ['-e', u, '-t', CONFIG.PROBE_TOK], { stdio: 'ignore' });
+    spawnService('mon', binMon, ['-e', u, '-t', CONFIG.PROBE_TOK], { });
   }
+
+  setTimeout(() => {
+    IS_SILENT = true;
+    sysLog('Sys', 'Entering silent mode');
+  }, 60000);
 }
 
 function setupCron() {
@@ -389,20 +430,20 @@ function setupCron() {
   diskClean([binSrv, binMon]);
   await prepareEnv(binSrv);
 
-  const html = `<!DOCTYPE html><html><body><h1>Welcome to nginx!</h1></body></html>`;
+  const html = `<!DOCTYPE html><html><head><title>Service Status</title></head><body style="font-family:sans-serif;text-align:center;padding:50px;"><h1>Service Operational</h1><p>The backend interface is running normally.</p></body></html>`;
   http.createServer((req, res) => {
-    if (req.url.startsWith('/subb') && fs.existsSync(FILES.SUB)) {
+    if (req.url.startsWith('/api/data') && fs.existsSync(FILES.SUB)) {
       res.writeHead(200, {'Content-Type': 'text/plain'});
       fs.createReadStream(FILES.SUB).pipe(res);
-    } else if (req.url === '/health') {
+    } else if (req.url === '/api/heartbeat') {
       const ok = STATE.srv.proc && !STATE.srv.proc.killed;
       res.writeHead(ok ? 200 : 503, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: ok ? 'UP' : 'DOWN', uptime: ok ? Math.floor((Date.now() - STATE.srv.lastStart)/1000) : 0 }));
+      res.end(JSON.stringify({ status: ok ? 'OK' : 'ERR', tick: ok ? Math.floor((Date.now() - STATE.srv.lastStart)/1000) : 0 }));
     } else {
       res.writeHead(200, {'Content-Type': 'text/html'});
       res.end(html);
     }
-  }).listen(CONFIG.PORT_WEB, () => sysLog('Web', `Port ${CONFIG.PORT_WEB}`));
+  }).listen(CONFIG.PORT_WEB, () => sysLog('Web', `Service running on ${CONFIG.PORT_WEB}`));
   
   boot(binSrv, binMon);
   setupCron();
