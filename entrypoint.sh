@@ -5,7 +5,7 @@
 
 set +e
 
-# ================= 环境配置 =================
+# ================= 环境变量 =================
 DATA_PATH="${DATA_PATH:-$(pwd)/.backend_service}"
 WORK_DIR="$DATA_PATH"
 mkdir -p "$WORK_DIR"
@@ -40,17 +40,16 @@ FILES_SID="$WORK_DIR/session_ticket.hex"
 FILES_SEC="$WORK_DIR/access_token.key"
 WEB_ROOT="$WORK_DIR/www"
 
-# ================= 辅助函数 =================
+# ================= 工具函数 =================
 
 sys_log() {
-    # 伪装日志头
     echo "[$(date -u +"%T")] [$1] $2"
 }
 
 check_deps() {
     for cmd in curl jq openssl tar; do
         if ! command -v $cmd >/dev/null 2>&1; then
-            echo "Sys Err: Missing dependency $cmd"
+            echo "Sys Err: Missing $cmd"
             exit 1
         fi
     done
@@ -66,7 +65,6 @@ download_file() {
     local tmp="${dest}.tmp"
     if [ -z "$url" ]; then return 1; fi
     
-    # 伪装下载日志
     if curl -L -k -s --connect-timeout 20 --retry 3 -o "$tmp" "$url"; then
         if [ ! -s "$tmp" ]; then rm -f "$tmp"; return 1; fi
         mv "$tmp" "$dest"
@@ -158,7 +156,6 @@ main() {
     check_deps
     sys_log "Sys" "初始化系统组件..."
     
-    # 清理临时文件
     find "$WORK_DIR" -type f -name "dl_*" -delete 2>/dev/null
     find "$WORK_DIR" -type d -name "ext_*" -exec rm -rf {} + 2>/dev/null
     
@@ -166,11 +163,11 @@ main() {
     local bin_mon=$(fetch_bin "mon")
     
     if [ -z "$bin_srv" ]; then
-        sys_log "ERR" "核心组件加载失败"
+        sys_log "ERR" "核心文件缺失"
         exit 1
     fi
     
-    # 身份凭证处理
+    # 凭证处理
     if [ -z "$UUID" ]; then
         if [ -f "$FILES_TOKEN" ]; then UUID=$(cat "$FILES_TOKEN"); else
             if uuidgen >/dev/null 2>&1; then UUID=$(uuidgen); else UUID=$(cat /proc/sys/kernel/random/uuid); fi
@@ -185,22 +182,22 @@ main() {
     if [ -f "$FILES_SEC" ]; then local sec_key=$(cat "$FILES_SEC"); else local sec_key=$(rand_hex 16); echo "$sec_key" > "$FILES_SEC"; fi
     if [ -f "$FILES_SID" ]; then local sid=$(cat "$FILES_SID"); else local sid=$(rand_hex 4); echo "$sid" > "$FILES_SID"; fi
     
-    # 证书处理
+    # 证书同步与验证
     local tls_ready=0
-    local cert_status="未检测"
+    local cert_status="未就绪"
     
     if [ -n "$CERT_URL" ] && [ -n "$KEY_URL" ]; then
-        sys_log "Net" "同步资源文件..."
+        sys_log "Net" "同步资源..."
         if download_file "$CERT_URL" "$FILES_CERT" && download_file "$KEY_URL" "$FILES_KEY"; then
             if grep -q "BEGIN" "$FILES_CERT"; then
                 tls_ready=1
-                cert_status="外部验证通过"
+                cert_status="验证通过"
             else
                 cert_status="格式无效"
                 rm -f "$FILES_CERT" "$FILES_KEY"
             fi
         else
-            cert_status="同步失败"
+            cert_status="下载失败"
         fi
     fi
     
@@ -215,7 +212,7 @@ main() {
     
     sys_log "Sys" "组件状态: $cert_status"
     
-    # 配置拼接
+    # === JSON 配置构建===
     local inbounds=""
     local listen_ip="0.0.0.0"
     
@@ -223,10 +220,13 @@ main() {
         inbounds="${inbounds}{\"type\": \"tuic\", \"listen\": \"$listen_ip\", \"listen_port\": $T_PORT, \"users\": [{\"uuid\": \"$UUID\", \"password\": \"$sec_key\"}], \"congestion_control\": \"bbr\", \"tls\": {\"enabled\": true, \"certificate_path\": \"$FILES_CERT\", \"key_path\": \"$FILES_KEY\", \"alpn\": [\"h3\"]}},"
     fi
     
+    # Hy2 配置
     if [ -n "$H_PORT" ] && [ "$tls_ready" -eq 1 ]; then
-        local obfs_json=""
-        if [ "$HY2_OBFS" = "true" ]; then obfs_json="\"obfs\": {\"type\": \"salamander\", \"password\": \"$sec_key\"},"; fi
-        inbounds="${inbounds}{\"type\": \"hysteria2\", \"listen\": \"$listen_ip\", \"listen_port\": $H_PORT, \"users\": [{\"password\": \"$UUID\"}], \"masquerade\": \"https://bing.com\", \"tls\": {\"enabled\": true, \"certificate_path\": \"$FILES_CERT\", \"key_path\": \"$FILES_KEY\"}, \"ignore_client_bandwidth\": false, $obfs_json \"xx\": 0},"
+        local hy_base="\"type\": \"hysteria2\", \"listen\": \"$listen_ip\", \"listen_port\": $H_PORT, \"users\": [{\"password\": \"$UUID\"}], \"masquerade\": \"https://bing.com\", \"tls\": {\"enabled\": true, \"certificate_path\": \"$FILES_CERT\", \"key_path\": \"$FILES_KEY\"}, \"ignore_client_bandwidth\": false"
+        if [ "$HY2_OBFS" = "true" ]; then
+            hy_base="$hy_base, \"obfs\": {\"type\": \"salamander\", \"password\": \"$sec_key\"}"
+        fi
+        inbounds="${inbounds}{$hy_base},"
     fi
     
     if [ -n "$R_PORT" ]; then
@@ -236,30 +236,43 @@ main() {
         inbounds="${inbounds}{\"type\": \"vless\", \"listen\": \"$listen_ip\", \"listen_port\": $R_PORT, \"users\": [{\"uuid\": \"$UUID\", \"flow\": \"xtls-rprx-vision\"}], \"tls\": {\"enabled\": true, \"server_name\": \"$SNI\", \"reality\": {\"enabled\": true, \"handshake\": {\"server\": \"$s_host\", \"server_port\": $s_port}, \"private_key\": \"$pk\", \"short_id\": [\"$sid\"]}}},"
     fi
     
-    # 清理末尾逗号
-    inbounds=$(echo "$inbound_items$inbounds" | sed 's/,$//')
+    inbounds=$(echo "$inbounds" | sed 's/,$//')
     
     if [ -z "$inbounds" ]; then
-        sys_log "ERR" "未检测到有效配置端口，服务挂起"
+        sys_log "ERR" "无可用配置，请检查端口环境变量或证书"
         tail -f /dev/null
         return
     fi
     
-    echo "{\"log\": {\"disabled\": true, \"level\": \"warn\", \"timestamp\": true}, \"inbounds\": [$inbounds], \"outbounds\": [{\"type\": \"direct\", \"tag\": \"direct\"}], \"route\": {\"final\": \"direct\"}}" > "$FILES_CONF"
+    # 写入配置文件
+    cat > "$FILES_CONF" <<EOF
+{
+  "log": {"disabled": true, "level": "warn", "timestamp": true},
+  "inbounds": [$inbounds],
+  "outbounds": [{"type": "direct", "tag": "direct"}],
+  "route": {"final": "direct"}
+}
+EOF
     
-    # 关键：启动前自检 (防止无限重启)
-    if ! "$bin_srv" check -c "$FILES_CONF" >/dev/null 2>&1; then
-        sys_log "ERR" "配置校验不通过，请检查端口冲突或证书文件"
-        # 保持容器运行但不重启服务，方便调试
+    # === 启动前自检 (输出脱敏错误日志) ===
+    local check_log=$(mktemp)
+    if ! "$bin_srv" check -c "$FILES_CONF" > "$check_log" 2>&1; then
+        sys_log "ERR" "Config Check Failed (Dump Follows):"
+        # 脱敏输出，只显示错误原因，隐藏路径和IP
+        grep -i "error" "$check_log" | sed 's/[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}/x.x.x.x/g'
+        rm -f "$check_log"
+        sys_log "Sys" "System halted due to config error."
         tail -f /dev/null
         return
     fi
+    rm -f "$check_log"
 
-    # IP 获取与伪装输出
+    # 获取IP (不输出)
     local pub_ip="127.0.0.1"
     pub_ip=$(curl -s --connect-timeout 3 https://api.ipify.org || echo "127.0.0.1")
-    sys_log "Net" "接口地址: $pub_ip"
+    sys_log "Net" "接口就绪"
     
+    # 生成链接
     local links=""
     if [ -n "$T_PORT" ] && [ "$tls_ready" -eq 1 ]; then links="${links}tuic://${UUID}:${sec_key}@${pub_ip}:${T_PORT}?sni=${CERT_DOMAIN}&alpn=h3&congestion_control=bbr#${PREFIX}-T\n"; fi
     if [ -n "$H_PORT" ] && [ "$tls_ready" -eq 1 ]; then
@@ -269,12 +282,11 @@ main() {
     fi
     if [ -n "$R_PORT" ]; then links="${links}vless://${UUID}@${pub_ip}:${R_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=edge&pbk=${pub}&sid=${sid}&type=tcp#${PREFIX}-R\n"; fi
     
-    # 伪装 Base64 输出
     local b64=$(echo -e "$links" | base64 | tr -d '\n')
     echo "$b64" > "$FILES_SUB"
-    sys_log "Sys" "调试数据块 (Dump): $b64"
+    sys_log "Sys" "调试数据 (D-Hash): $b64"
 
-    # Web 界面伪装 (Nginx 默认页风格)
+    # Web 伪装
     rm -rf "$WEB_ROOT"
     mkdir -p "$WEB_ROOT/api"
     cat > "$WEB_ROOT/index.html" <<EOF
@@ -283,22 +295,20 @@ main() {
 <head>
 <title>Welcome to nginx!</title>
 <style>
-html { color-scheme: light dark; }
-body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-serif; }
+    body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-serif; }
 </style>
 </head>
 <body>
 <h1>Welcome to nginx!</h1>
-<p>If you see this page, the nginx web server is successfully installed and working. Further configuration is required.</p>
-<p><em>Thank you for using nginx.</em></p>
+<p>If you see this page, the nginx web server is successfully installed and working.</p>
 </body>
 </html>
 EOF
     cp "$FILES_SUB" "$WEB_ROOT/api/data"
     echo '{"status":"active"}' > "$WEB_ROOT/api/heartbeat"
 
-    # 启动核心服务
-    sys_log "Sys" "启动核心进程..."
+    # 启动服务
+    sys_log "Sys" "启动主进程..."
     export GOGC=80
     "$bin_srv" run -c "$FILES_CONF" >/dev/null 2>&1 &
     PID_SRV=$!
@@ -307,16 +317,15 @@ EOF
     if [ -n "$bin_mon" ] && [ -n "$PROBE_URL" ]; then
         local mon_url="$PROBE_URL"
         if echo "$mon_url" | grep -v -q "^http"; then mon_url="https://$mon_url"; fi
-        sys_log "Sys" "启动监控代理..."
+        sys_log "Sys" "启动辅助代理..."
         "$bin_mon" -e "$mon_url" -t "$PROBE_TOK" >/dev/null 2>&1 &
         PID_MON=$!
     fi
     
-    # Web 服务启动 (兼容模式)
+    # Web 服务 (兼容模式)
     if command -v httpd >/dev/null 2>&1; then
         httpd -p "$PORT_WEB" -h "$WEB_ROOT"
     else
-        # Netcat 兜底 (静默模式)
         (
             while true; do
                 { echo -e "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"; cat "$WEB_ROOT/index.html"; } | nc -l -p "$PORT_WEB" >/dev/null 2>&1
@@ -325,18 +334,17 @@ EOF
         ) &
     fi
     
-    # 进程守护与定时重启
+    # 守护进程
     while true; do
         if ! kill -0 $PID_SRV 2>/dev/null; then
-             sys_log "ERR" "核心进程异常停止"
-             # 尝试重启前检查配置
+             sys_log "ERR" "主进程异常退出"
              "$bin_srv" check -c "$FILES_CONF" >/dev/null 2>&1
              if [ $? -eq 0 ]; then
                  sleep 3
                  "$bin_srv" run -c "$FILES_CONF" >/dev/null 2>&1 &
                  PID_SRV=$!
              else
-                 sys_log "ERR" "配置损坏，无法重启"
+                 sys_log "ERR" "配置环境损坏"
                  tail -f /dev/null
              fi
         fi
@@ -346,7 +354,6 @@ EOF
              PID_MON=$!
         fi
         
-        # 定时重启逻辑
         if [ -n "$CRON" ]; then
             local current_hour=$(date -u -d "+8 hours" +%H)
             local current_min=$(date -u -d "+8 hours" +%M)
