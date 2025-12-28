@@ -28,7 +28,7 @@ sys_log() {
 }
 
 check_deps() {
-    local deps=("curl" "tar" "grep" "sed" "awk" "openssl")
+    local deps=("curl" "tar" "grep" "sed" "awk" "openssl" "date")
     for cmd in "${deps[@]}"; do
         if ! command -v "$cmd" &> /dev/null; then
             echo "Error: Required command '$cmd' not found."
