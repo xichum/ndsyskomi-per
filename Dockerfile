@@ -1,6 +1,5 @@
 FROM alpine:latest
 
-# 安装基础依赖
 RUN apk add --no-cache curl jq openssl ca-certificates tar libstdc++ gcompat busybox-extras
 
 WORKDIR /app
