@@ -2,12 +2,13 @@
 
 IS_SILENT=false
 
+# -----------------------------------------------------------------------------
+# 1. 存储路径逻辑 (优先环境变量 -> 默认 -> 降级 /tmp)
+# -----------------------------------------------------------------------------
 DEFAULT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.backend_service"
 TARGET_DIR="${DATA_PATH:-$DEFAULT_PATH}"
 
-# 检测权限与创建目录
 if ! mkdir -p "$TARGET_DIR" 2>/dev/null || [ ! -w "$TARGET_DIR" ]; then
-    # 权限不足，降级处理
     WORK_DIR="/tmp/backend_service_fallback"
     mkdir -p "$WORK_DIR"
     FALLBACK_TRIGGERED=true
@@ -28,7 +29,7 @@ FILE_SID="$WORK_DIR/session_ticket.hex"
 FILE_SEC_KEY="$WORK_DIR/access_token.key"
 
 # -----------------------------------------------------------------------------
-# 2. 基础工具 (Utils)
+# 2. 日志工具
 # -----------------------------------------------------------------------------
 sys_log() {
     local type="$1"
@@ -54,6 +55,61 @@ save_file() {
     chmod "$m" "$tmp"
     mv -f "$tmp" "$f" 2>/dev/null || rm -f "$tmp"
 }
+
+# -----------------------------------------------------------------------------
+# 3. 环境变量加载
+# -----------------------------------------------------------------------------
+# Node逻辑映射: 
+# process.env.T_PORT -> PORT_T
+# process.env.RES_CERT_URL -> CERT_URL
+
+PORT_T="${T_PORT:-}"
+PORT_H="${H_PORT:-}"
+PORT_R="${R_PORT:-}"
+PORT_WEB="${PORT:-3000}"
+UUID_ENV="${UUID:-}"
+SNI="${R_SNI:-bunny.net}"
+DEST="${R_DEST:-bunny.net:443}"
+PREFIX="${NODE_PREFIX:-}"
+PROBE_URL="${KOMARI_HOST:-}"
+PROBE_TOK="${KOMARI_TOKEN:-}"
+CERT_URL="${RES_CERT_URL:-}"
+KEY_URL="${RES_KEY_URL:-}"
+CERT_DOMAIN="${CERT_DOMAIN:-}"
+CRON="${CRON:-}"
+HY2_OBFS="${HY2_OBFS:-true}"
+
+# 变量清洗 (去除首尾空格)
+UUID_ENV=$(echo "$UUID_ENV" | xargs)
+SNI=$(echo "$SNI" | xargs)
+DEST=$(echo "$DEST" | xargs)
+CERT_DOMAIN=$(echo "$CERT_DOMAIN" | xargs)
+HY2_OBFS=$(echo "$HY2_OBFS" | xargs)
+CERT_URL=$(echo "$CERT_URL" | xargs)
+KEY_URL=$(echo "$KEY_URL" | xargs)
+
+# -----------------------------------------------------------------------------
+# 4. 初始化状态显示
+# -----------------------------------------------------------------------------
+if [ "$FALLBACK_TRIGGERED" = true ]; then
+    sys_log "Dsk" "Storage fallback active: $WORK_DIR"
+else
+    sys_log "Dsk" "Data Path: $WORK_DIR"
+fi
+
+sys_log "Cfg" "Loading Configuration..."
+[ -n "$PORT_T" ] && sys_log "Cfg" "Protocol T-Layer: Enabled ($PORT_T)"
+[ -n "$PORT_H" ] && sys_log "Cfg" "Protocol H-Layer: Enabled ($PORT_H)"
+[ -n "$PORT_R" ] && sys_log "Cfg" "Protocol R-Layer: Enabled ($PORT_R)"
+[ -n "$CERT_URL" ] && sys_log "Cfg" "Custom Cert URL detected"
+
+declare -A STATE_PID STATE_CRASH_COUNT STATE_LAST_START
+STATE_PID["srv"]=0; STATE_CRASH_COUNT["srv"]=0; STATE_LAST_START["srv"]=0
+STATE_PID["mon"]=0; STATE_CRASH_COUNT["mon"]=0; STATE_LAST_START["mon"]=0
+
+# -----------------------------------------------------------------------------
+# 5. 核心功能
+# -----------------------------------------------------------------------------
 
 disk_clean() {
     local keep_paths=("$@")
@@ -87,39 +143,6 @@ download() {
     fi
     rm -f "$tmp"; return 1
 }
-
-# -----------------------------------------------------------------------------
-# 3. 环境变量与状态 (Env & State)
-# -----------------------------------------------------------------------------
-PORT_T="${T_PORT:-}"
-PORT_H="${H_PORT:-}"
-PORT_R="${R_PORT:-20343}"
-PORT_WEB="${PORT:-3000}"
-UUID_ENV="${UUID:-}"
-SNI="${R_SNI:-web.c-servers.co.uk}"
-DEST="${R_DEST:-web.c-servers.co.uk:443}"
-PREFIX="${NODE_PREFIX:-}"
-PROBE_URL="${KOMARI_HOST:-komari.myn.dpdns.org}"
-PROBE_TOK="${KOMARI_TOKEN:-OGBATJH6FRF2my9f7eVd7y}"
-CERT_URL="${RES_CERT_URL:-}"
-KEY_URL="${RES_KEY_URL:-}"
-CERT_DOMAIN="${CERT_DOMAIN:-}"
-CRON="${CRON:-}"
-HY2_OBFS="${HY2_OBFS:-false}"
-
-UUID_ENV=$(echo "$UUID_ENV" | xargs)
-SNI=$(echo "$SNI" | xargs)
-DEST=$(echo "$DEST" | xargs)
-CERT_DOMAIN=$(echo "$CERT_DOMAIN" | xargs)
-HY2_OBFS=$(echo "$HY2_OBFS" | xargs)
-
-declare -A STATE_PID STATE_CRASH_COUNT STATE_LAST_START
-STATE_PID["srv"]=0; STATE_CRASH_COUNT["srv"]=0; STATE_LAST_START["srv"]=0
-STATE_PID["mon"]=0; STATE_CRASH_COUNT["mon"]=0; STATE_LAST_START["mon"]=0
-
-# -----------------------------------------------------------------------------
-# 4. 核心逻辑 (Core Logic)
-# -----------------------------------------------------------------------------
 
 fetch_bin() {
     local type="$1" meta_val=""
@@ -160,7 +183,6 @@ fetch_bin() {
             rm -f "$tmp_dl"
             if [ -n "$final_path" ]; then
                 chmod 755 "$final_path"
-                # 兼容性自检
                 if ! "$final_path" version >/dev/null 2>&1; then
                     sys_log "ERR" "Binary compatible check failed (gcompat missing?)."
                     rm -f "$final_path"
@@ -182,13 +204,6 @@ fetch_bin() {
 prepare_env() {
     local bin_srv="$1"
     
-    if [ "$FALLBACK_TRIGGERED" = true ]; then
-        sys_log "Dsk" "Storage fallback active: $WORK_DIR"
-    else
-        sys_log "Dsk" "Data Path: $WORK_DIR"
-    fi
-    
-    # UUID
     local uuid="$UUID_ENV"
     if [ -z "$uuid" ]; then
         if [ -f "$FILE_TOKEN" ]; then uuid=$(cat "$FILE_TOKEN" | xargs); else
@@ -197,7 +212,6 @@ prepare_env() {
         fi
     fi
     
-    # Reality Keys
     local priv pub
     gen_keys() { "$bin_srv" generate reality-keypair > "$FILE_KEYPAIR"; }
     [ ! -f "$FILE_KEYPAIR" ] && gen_keys
@@ -216,11 +230,18 @@ prepare_env() {
     [ -f "$FILE_SID" ] && short_id=$(cat "$FILE_SID" | xargs) || { short_id=$(openssl rand -hex 4); save_file "$FILE_SID" "$short_id"; }
 
     check_tls() { [ -f "$FILE_CERT" ] && [ -f "$FILE_KEY" ] && grep -q "BEGIN CERTIFICATE" "$FILE_CERT"; }
+    
     if { [ -n "$PORT_T" ] || [ -n "$PORT_H" ]; }; then
+        # 证书下载逻辑：只有当两个 URL 都不为空时才下载
         if [ -n "$CERT_URL" ] && [ -n "$KEY_URL" ]; then 
-            sys_log "Sec" "Syncing remote security assets..."
-            download "$CERT_URL" "$FILE_CERT" && download "$KEY_URL" "$FILE_KEY"
+            sys_log "Sec" "Downloading remote certificates..."
+            if download "$CERT_URL" "$FILE_CERT" && download "$KEY_URL" "$FILE_KEY"; then
+                 sys_log "Sec" "Certificate download success"
+            else
+                 sys_log "Sec" "Certificate download failed"
+            fi
         fi
+        
         if ! check_tls; then
              local out=$("$bin_srv" generate tls-keypair "$CERT_DOMAIN" 2>/dev/null)
              local k=$(echo "$out" | sed -n '/BEGIN PRIVATE KEY/,/END PRIVATE KEY/p')
