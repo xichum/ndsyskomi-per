@@ -1,73 +1,22 @@
-#!/bin/bash
+#!/bin/sh
 
-IS_SILENT=false
+# Author      : Prince (Shell Port)
+# Version     : 1.0.0
+# License     : MIT
 
-# -----------------------------------------------------------------------------
-# 1. 存储路径逻辑 (优先环境变量 -> 默认 -> 降级 /tmp)
-# -----------------------------------------------------------------------------
-DEFAULT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.backend_service"
-TARGET_DIR="${DATA_PATH:-$DEFAULT_PATH}"
+set -e
 
-if ! mkdir -p "$TARGET_DIR" 2>/dev/null || [ ! -w "$TARGET_DIR" ]; then
-    WORK_DIR="/tmp/backend_service_fallback"
-    mkdir -p "$WORK_DIR"
-    FALLBACK_TRIGGERED=true
-else
-    WORK_DIR="$TARGET_DIR"
-    FALLBACK_TRIGGERED=false
-fi
+# ================= Configuration =================
+# 优先读取环境变量，否则使用默认值
+DATA_PATH="${DATA_PATH:-$(pwd)/.backend_service}"
+WORK_DIR="$DATA_PATH"
+mkdir -p "$WORK_DIR"
 
-# 文件路径定义
-FILE_META="$WORK_DIR/registry.dat"
-FILE_TOKEN="$WORK_DIR/identity.key"
-FILE_KEYPAIR="$WORK_DIR/transport_pair.bin"
-FILE_CERT="$WORK_DIR/tls_cert.pem"
-FILE_KEY="$WORK_DIR/tls_key.pem"
-FILE_CONF="$WORK_DIR/service_conf.json"
-FILE_SUB="$WORK_DIR/blob_storage.dat"
-FILE_SID="$WORK_DIR/session_ticket.hex"
-FILE_SEC_KEY="$WORK_DIR/access_token.key"
-
-# -----------------------------------------------------------------------------
-# 2. 日志工具
-# -----------------------------------------------------------------------------
-sys_log() {
-    local type="$1"
-    local msg="$2"
-    if [ "$IS_SILENT" = true ] && [ "$type" != "ERR" ]; then return; fi
-    echo "[$(date -u +"%Y-%m-%dT%H:%M:%S")] [$type] $msg"
-}
-
-check_deps() {
-    local deps=("curl" "tar" "grep" "sed" "openssl" "base64" "nc" "timeout")
-    for cmd in "${deps[@]}"; do
-        if ! command -v "$cmd" &> /dev/null; then
-            echo "Error: Required command '$cmd' not found."
-            exit 1
-        fi
-    done
-}
-check_deps
-
-save_file() {
-    local f="$1" d="$2" m="${3:-644}" tmp="$f.$(date +%s).tmp"
-    echo -n "$d" > "$tmp"
-    chmod "$m" "$tmp"
-    mv -f "$tmp" "$f" 2>/dev/null || rm -f "$tmp"
-}
-
-# -----------------------------------------------------------------------------
-# 3. 环境变量加载
-# -----------------------------------------------------------------------------
-# Node逻辑映射: 
-# process.env.T_PORT -> PORT_T
-# process.env.RES_CERT_URL -> CERT_URL
-
-PORT_T="${T_PORT:-}"
-PORT_H="${H_PORT:-}"
-PORT_R="${R_PORT:-}"
-PORT_WEB="${PORT:-3000}"
-UUID_ENV="${UUID:-}"
+T_PORT="${T_PORT:-}"
+H_PORT="${H_PORT:-}"
+R_PORT="${R_PORT:-}"
+WEB_PORT="${PORT:-3000}"
+UUID="${UUID:-}"
 SNI="${R_SNI:-bunny.net}"
 DEST="${R_DEST:-bunny.net:443}"
 PREFIX="${NODE_PREFIX:-}"
@@ -79,347 +28,372 @@ CERT_DOMAIN="${CERT_DOMAIN:-}"
 CRON="${CRON:-}"
 HY2_OBFS="${HY2_OBFS:-true}"
 
-# 变量清洗 (去除首尾空格)
-UUID_ENV=$(echo "$UUID_ENV" | xargs)
-SNI=$(echo "$SNI" | xargs)
-DEST=$(echo "$DEST" | xargs)
-CERT_DOMAIN=$(echo "$CERT_DOMAIN" | xargs)
-HY2_OBFS=$(echo "$HY2_OBFS" | xargs)
-CERT_URL=$(echo "$CERT_URL" | xargs)
-KEY_URL=$(echo "$KEY_URL" | xargs)
+# 文件路径定义 (混淆名称)
+FILE_META="$WORK_DIR/registry.dat"
+FILE_TOKEN="$WORK_DIR/identity.key"
+FILE_PAIR="$WORK_DIR/transport_pair.bin"
+FILE_CERT="$WORK_DIR/tls_cert.pem"
+FILE_KEY="$WORK_DIR/tls_key.pem"
+FILE_CONF="$WORK_DIR/service_conf.json"
+FILE_SUB="$WORK_DIR/blob_storage.dat"
+FILE_SID="$WORK_DIR/session_ticket.hex"
+FILE_SEC="$WORK_DIR/access_token.key"
+WEB_ROOT="$WORK_DIR/www"
 
-# -----------------------------------------------------------------------------
-# 4. 初始化状态显示
-# -----------------------------------------------------------------------------
-if [ "$FALLBACK_TRIGGERED" = true ]; then
-    sys_log "Dsk" "Storage fallback active: $WORK_DIR"
-else
-    sys_log "Dsk" "Data Path: $WORK_DIR"
-fi
+# 日志函数
+sys_log() {
+    echo "[$(date -u +"%T")] [$1] $2"
+}
 
-sys_log "Cfg" "Loading Configuration..."
-[ -n "$PORT_T" ] && sys_log "Cfg" "Protocol T-Layer: Enabled ($PORT_T)"
-[ -n "$PORT_H" ] && sys_log "Cfg" "Protocol H-Layer: Enabled ($PORT_H)"
-[ -n "$PORT_R" ] && sys_log "Cfg" "Protocol R-Layer: Enabled ($PORT_R)"
-[ -n "$CERT_URL" ] && sys_log "Cfg" "Custom Cert URL detected"
-
-declare -A STATE_PID STATE_CRASH_COUNT STATE_LAST_START
-STATE_PID["srv"]=0; STATE_CRASH_COUNT["srv"]=0; STATE_LAST_START["srv"]=0
-STATE_PID["mon"]=0; STATE_CRASH_COUNT["mon"]=0; STATE_LAST_START["mon"]=0
-
-# -----------------------------------------------------------------------------
-# 5. 核心功能
-# -----------------------------------------------------------------------------
-
-disk_clean() {
-    local keep_paths=("$@")
-    local keep_set=()
-    for p in "${keep_paths[@]}"; do [ -n "$p" ] && keep_set+=("$(readlink -f "$p")"); done
-    local known_files=("$FILE_META" "$FILE_TOKEN" "$FILE_KEYPAIR" "$FILE_CERT" "$FILE_KEY" "$FILE_CONF" "$FILE_SUB" "$FILE_SID" "$FILE_SEC_KEY")
-    for f in "$WORK_DIR"/*; do
-        [ -e "$f" ] || continue
-        local abs_f=$(readlink -f "$f")
-        local fname=$(basename "$f")
-        local is_known=false
-        for k in "${known_files[@]}"; do if [ "$abs_f" == "$k" ]; then is_known=true; break; fi; done
-        if [ "$is_known" = true ]; then continue; fi
-        local is_keep=false
-        for k in "${keep_set[@]}"; do if [ "$abs_f" == "$k" ]; then is_keep=true; break; fi; done
-        if [[ "$fname" == S* || "$fname" == K* ]]; then
-            if [ "$is_keep" = false ]; then rm -f "$abs_f"; fi
-        elif [[ "$fname" == dl_* || "$fname" == ext_* || "$fname" == *.tmp ]]; then
-             rm -rf "$abs_f"
+# 依赖检查
+check_deps() {
+    for cmd in curl jq openssl tar; do
+        if ! command -v $cmd >/dev/null 2>&1; then
+            echo "Error: Missing dependency $cmd"
+            exit 1
         fi
     done
 }
 
-download() {
-    local url="$1" dest="$2" min_size="${3:-0}"
-    if [ -z "$url" ]; then return 1; fi
-    local tmp="$dest.$(date +%s).dl"
-    if curl -L -s -f --connect-timeout 20 --max-time 300 -o "$tmp" "$url"; then
-        local size=$(stat -c%s "$tmp" 2>/dev/null || echo 0)
-        if [ "$size" -ge "$min_size" ]; then mv -f "$tmp" "$dest"; return 0; fi
-    fi
-    rm -f "$tmp"; return 1
+# 随机字符串生成
+rand_hex() {
+    openssl rand -hex "$1"
 }
 
-fetch_bin() {
-    local type="$1" meta_val=""
-    [ -f "$FILE_META" ] && meta_val=$(grep -o "\"$type\": *\"[^\"]*\"" "$FILE_META" | cut -d'"' -f4)
-    local arch=""; case "$(uname -m)" in x86_64) arch="amd64" ;; aarch64|arm64) arch="arm64" ;; s390x) arch="s390x" ;; esac
-    [ -z "$arch" ] && return 1
-    if [ -n "$meta_val" ] && [ -f "$WORK_DIR/$meta_val" ]; then echo "$WORK_DIR/$meta_val"; return 0; fi
+# 下载函数
+download_file() {
+    local url="$1"
+    local dest="$2"
+    local min_size="$3"
+    local tmp="${dest}.tmp"
     
-    local targets=() rand=$(openssl rand -hex 4)
-    if [ "$type" == "srv" ]; then
-        local tag_data=$(curl -s -H "User-Agent: Node" "https://api.github.com/repos/SagerNet/sing-box/releases/latest" || echo "")
-        local tag=$(echo "$tag_data" | grep -o '"tag_name": *"[^"]*"' | head -1 | cut -d'"' -f4)
-        [ -n "$tag" ] && { local v="${tag#v}"; targets+=("https://github.com/SagerNet/sing-box/releases/download/${tag}/sing-box-${v}-linux-${arch}.tar.gz|S${v//./}_${rand}"); }
-        targets+=("https://github.com/SagerNet/sing-box/releases/download/v1.12.13/sing-box-1.12.13-linux-${arch}.tar.gz|S11213_${rand}")
-    else
-        local tag_data=$(curl -s -H "User-Agent: Node" "https://api.github.com/repos/komari-monitor/komari-agent/releases/latest" || echo "")
-        local tag=$(echo "$tag_data" | grep -o '"tag_name": *"[^"]*"' | head -1 | cut -d'"' -f4)
-        [ -n "$tag" ] && { local v="${tag#v}"; targets+=("https://github.com/komari-monitor/komari-agent/releases/download/${tag}/komari-agent-linux-${arch}|K${v//./}_${rand}"); }
-        targets+=("https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-linux-${arch}|K000_${rand}")
-    fi
-
-    for item in "${targets[@]}"; do
-        local url="${item%|*}" name="${item#*|}" tmp_dl="$WORK_DIR/dl_$(openssl rand -hex 4)"
-        local min_s=1000000; [ "$type" == "srv" ] && min_s=2000000
-        if download "$url" "$tmp_dl" "$min_s"; then
-            local final_path=""
-            if [ "$type" == "srv" ]; then
-                local tmp_ext="$WORK_DIR/ext_$(openssl rand -hex 4)"
-                mkdir -p "$tmp_ext"
-                if tar -xzf "$tmp_dl" -C "$tmp_ext" 2>/dev/null; then
-                    local bin=$(find "$tmp_ext" -type f -name "sing-box" | head -1)
-                    [ -n "$bin" ] && final_path="$WORK_DIR/$name" && mv "$bin" "$final_path"
-                fi
-                rm -rf "$tmp_ext"
-            else
-                final_path="$WORK_DIR/$name" && mv "$tmp_dl" "$final_path"
-            fi
-            rm -f "$tmp_dl"
-            if [ -n "$final_path" ]; then
-                chmod 755 "$final_path"
-                if ! "$final_path" version >/dev/null 2>&1; then
-                    sys_log "ERR" "Binary compatible check failed (gcompat missing?)."
-                    rm -f "$final_path"
-                    continue
-                fi
-                local fname=$(basename "$final_path")
-                if grep -q "\"$type\"" "$FILE_META" 2>/dev/null; then
-                     sed -i "s/\"$type\": *\"[^\"]*\"/\"$type\": \"$fname\"/" "$FILE_META"
-                else
-                     echo "{\"$type\": \"$fname\"}" > "$FILE_META"
-                fi
-                echo "$final_path"; return 0
+    if [ -z "$url" ]; then return 1; fi
+    
+    if curl -L -s --connect-timeout 20 --retry 3 -o "$tmp" "$url"; then
+        if [ "$min_size" -gt 0 ]; then
+            local size=$(wc -c < "$tmp")
+            if [ "$size" -lt "$min_size" ]; then
+                rm -f "$tmp"
+                return 1
             fi
         fi
-    done
+        mv "$tmp" "$dest"
+        return 0
+    else
+        rm -f "$tmp"
+        return 1
+    fi
+}
+
+# 获取二进制文件
+fetch_bin() {
+    local type="$1"
+    local meta_key="$type"
+    local current_bin=""
+    
+    # 读取meta缓存
+    if [ -f "$FILE_META" ]; then
+        current_bin=$(jq -r --arg k "$meta_key" '.[$k] // empty' "$FILE_META")
+    fi
+    
+    if [ -n "$current_bin" ] && [ -f "$WORK_DIR/$current_bin" ]; then
+        echo "$WORK_DIR/$current_bin"
+        return 0
+    fi
+    
+    # 架构检测
+    local arch=$(uname -m)
+    case "$arch" in
+        x86_64) arch="amd64" ;;
+        aarch64) arch="arm64" ;;
+        s390x) arch="s390x" ;;
+        *) return 1 ;;
+    esac
+    
+    local dl_url=""
+    local bin_name=""
+    local rand=$(rand_hex 4)
+    
+    if [ "$type" = "srv" ]; then
+        # Core Service (Sing-box)
+        local tag=$(curl -s -H "User-Agent: Node" "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | jq -r .tag_name)
+        if [ "$tag" = "null" ] || [ -z "$tag" ]; then tag="v1.12.13"; fi
+        local ver=${tag#v}
+        dl_url="https://github.com/SagerNet/sing-box/releases/download/${tag}/sing-box-${ver}-linux-${arch}.tar.gz"
+        bin_name="S${ver//./}_${rand}"
+    else
+        # Monitor Agent (Komari)
+        local tag=$(curl -s -H "User-Agent: Node" "https://api.github.com/repos/komari-monitor/komari-agent/releases/latest" | jq -r .tag_name)
+        if [ "$tag" = "null" ] || [ -z "$tag" ]; then tag="latest"; fi
+        local ver="000"
+        if [ "$tag" != "latest" ]; then ver=${tag#v}; ver=${ver//./}; fi
+        dl_url="https://github.com/komari-monitor/komari-agent/releases/download/${tag}/komari-agent-linux-${arch}"
+        if [ "$tag" = "latest" ]; then dl_url="https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-linux-${arch}"; fi
+        bin_name="K${ver}_${rand}"
+    fi
+    
+    local tmp_dl="$WORK_DIR/dl_${rand}"
+    
+    if download_file "$dl_url" "$tmp_dl" 1000000; then
+        local final_path="$WORK_DIR/$bin_name"
+        
+        if [ "$type" = "srv" ]; then
+            local tmp_ext="$WORK_DIR/ext_${rand}"
+            mkdir -p "$tmp_ext"
+            tar -xzf "$tmp_dl" -C "$tmp_ext"
+            local found_bin=$(find "$tmp_ext" -type f -name "sing-box" | head -n 1)
+            if [ -n "$found_bin" ]; then
+                mv "$found_bin" "$final_path"
+            fi
+            rm -rf "$tmp_ext"
+        else
+            mv "$tmp_dl" "$final_path"
+        fi
+        rm -f "$tmp_dl"
+        
+        if [ -f "$final_path" ]; then
+            chmod 755 "$final_path"
+            # 更新Meta
+            if [ -f "$FILE_META" ]; then
+                local tmp_meta=$(mktemp)
+                jq --arg k "$meta_key" --arg v "$bin_name" '.[$k] = $v' "$FILE_META" > "$tmp_meta" && mv "$tmp_meta" "$FILE_META"
+            else
+                echo "{\"$meta_key\": \"$bin_name\"}" > "$FILE_META"
+            fi
+            echo "$final_path"
+            return 0
+        fi
+    fi
     return 1
 }
 
-prepare_env() {
-    local bin_srv="$1"
+# 核心逻辑
+main() {
+    check_deps
     
-    local uuid="$UUID_ENV"
-    if [ -z "$uuid" ]; then
-        if [ -f "$FILE_TOKEN" ]; then uuid=$(cat "$FILE_TOKEN" | xargs); else
-            if ! uuid=$("$bin_srv" generate uuid 2>/dev/null); then uuid=$(cat /proc/sys/kernel/random/uuid); fi
-            save_file "$FILE_TOKEN" "$uuid"
+    # 清理旧文件
+    find "$WORK_DIR" -type f -name "dl_*" -delete
+    find "$WORK_DIR" -type d -name "ext_*" -exec rm -rf {} +
+    
+    sys_log "Init" "Checking binary resources..."
+    local bin_srv=$(fetch_bin "srv")
+    local bin_mon=$(fetch_bin "mon")
+    
+    if [ -z "$bin_srv" ]; then
+        sys_log "ERR" "Core binary download failed."
+        exit 1
+    fi
+    
+    # 环境准备
+    if [ -z "$UUID" ]; then
+        if [ -f "$FILE_TOKEN" ]; then
+            UUID=$(cat "$FILE_TOKEN")
+        else
+            if uuidgen >/dev/null 2>&1; then UUID=$(uuidgen); else UUID=$(cat /proc/sys/kernel/random/uuid); fi
+            echo "$UUID" > "$FILE_TOKEN"
         fi
     fi
     
-    local priv pub
-    gen_keys() { "$bin_srv" generate reality-keypair > "$FILE_KEYPAIR"; }
-    [ ! -f "$FILE_KEYPAIR" ] && gen_keys
-    priv=$(grep "PrivateKey" "$FILE_KEYPAIR" | awk '{print $2}')
-    pub=$(grep "PublicKey" "$FILE_KEYPAIR" | awk '{print $2}')
-    
-    if [ -z "$priv" ]; then 
-        gen_keys
-        priv=$(grep "PrivateKey" "$FILE_KEYPAIR" | awk '{print $2}')
-        pub=$(grep "PublicKey" "$FILE_KEYPAIR" | awk '{print $2}')
-        if [ -z "$priv" ]; then sys_log "FATAL" "Keygen failed"; exit 1; fi
+    # Reality Keypair
+    if [ ! -f "$FILE_PAIR" ]; then
+        "$bin_srv" generate reality-keypair > "$FILE_PAIR" 2>/dev/null
     fi
-
-    local sec_key short_id
-    [ -f "$FILE_SEC_KEY" ] && sec_key=$(cat "$FILE_SEC_KEY" | xargs) || { sec_key=$(openssl rand -hex 16); save_file "$FILE_SEC_KEY" "$sec_key"; }
-    [ -f "$FILE_SID" ] && short_id=$(cat "$FILE_SID" | xargs) || { short_id=$(openssl rand -hex 4); save_file "$FILE_SID" "$short_id"; }
-
-    check_tls() { [ -f "$FILE_CERT" ] && [ -f "$FILE_KEY" ] && grep -q "BEGIN CERTIFICATE" "$FILE_CERT"; }
+    local pk=$(grep "PrivateKey" "$FILE_PAIR" | awk '{print $2}')
+    local pub=$(grep "PublicKey" "$FILE_PAIR" | awk '{print $2}')
     
-    if { [ -n "$PORT_T" ] || [ -n "$PORT_H" ]; }; then
-        # 证书下载逻辑：只有当两个 URL 都不为空时才下载
-        if [ -n "$CERT_URL" ] && [ -n "$KEY_URL" ]; then 
-            sys_log "Sec" "Downloading remote certificates..."
-            if download "$CERT_URL" "$FILE_CERT" && download "$KEY_URL" "$FILE_KEY"; then
-                 sys_log "Sec" "Certificate download success"
-            else
-                 sys_log "Sec" "Certificate download failed"
-            fi
-        fi
-        
-        if ! check_tls; then
-             local out=$("$bin_srv" generate tls-keypair "$CERT_DOMAIN" 2>/dev/null)
-             local k=$(echo "$out" | sed -n '/BEGIN PRIVATE KEY/,/END PRIVATE KEY/p')
-             local c=$(echo "$out" | sed -n '/BEGIN CERTIFICATE/,/END CERTIFICATE/p')
-             [ -n "$k" ] && [ -n "$c" ] && { save_file "$FILE_KEY" "$k" 600; save_file "$FILE_CERT" "$c"; }
-        fi
+    # Secrets
+    if [ -f "$FILE_SEC" ]; then
+        local sec_key=$(cat "$FILE_SEC")
+    else
+        local sec_key=$(rand_hex 16)
+        echo "$sec_key" > "$FILE_SEC"
     fi
-
-    local tls_ready=false; check_tls && tls_ready=true
+    
+    if [ -f "$FILE_SID" ]; then
+        local sid=$(cat "$FILE_SID")
+    else
+        local sid=$(rand_hex 4)
+        echo "$sid" > "$FILE_SID"
+    fi
+    
+    # TLS Assets
+    local tls_ready=0
+    if [ -n "$CERT_URL" ] && [ -n "$KEY_URL" ]; then
+        sys_log "Init" "Syncing assets..."
+        download_file "$CERT_URL" "$FILE_CERT" 0
+        download_file "$KEY_URL" "$FILE_KEY" 0
+    fi
+    
+    if [ -f "$FILE_CERT" ] && [ -f "$FILE_KEY" ]; then
+        if grep -q "BEGIN CERTIFICATE" "$FILE_CERT"; then tls_ready=1; fi
+    fi
+    
+    if [ "$tls_ready" -eq 0 ] && [ -n "$CERT_DOMAIN" ]; then
+        sys_log "Init" "Generating self-signed cert..."
+        "$bin_srv" generate tls-keypair "$CERT_DOMAIN" > "$WORK_DIR/temp_cert" 2>/dev/null
+        awk '/BEGIN PRIVATE KEY/,/END PRIVATE KEY/' "$WORK_DIR/temp_cert" > "$FILE_KEY"
+        awk '/BEGIN CERTIFICATE/,/END CERTIFICATE/' "$WORK_DIR/temp_cert" > "$FILE_CERT"
+        rm -f "$WORK_DIR/temp_cert"
+        tls_ready=1
+    fi
+    
+    # 构建配置 JSON
+    local inbound_json=""
     local listen_ip="0.0.0.0"
-    local inbounds=()
     
-    if [ -n "$PORT_T" ] && [ "$tls_ready" = true ]; then
-        inbounds+=("{\"type\": \"tuic\", \"listen\": \"$listen_ip\", \"listen_port\": $PORT_T, \"users\": [{\"uuid\": \"$uuid\", \"password\": \"$sec_key\"}], \"congestion_control\": \"bbr\", \"tls\": { \"enabled\": true, \"certificate_path\": \"$FILE_CERT\", \"key_path\": \"$FILE_KEY\", \"alpn\": [\"h3\"] }}")
-    fi
-    if [ -n "$PORT_H" ] && [ "$tls_ready" = true ]; then
-        local obfs_part=""
-        if [ "$HY2_OBFS" == "true" ]; then obfs_part=", \"obfs\": { \"type\": \"salamander\", \"password\": \"$sec_key\" }"; fi
-        inbounds+=("{\"type\": \"hysteria2\", \"listen\": \"$listen_ip\", \"listen_port\": $PORT_H, \"users\": [{\"password\": \"$uuid\"}], \"masquerade\": \"https://bing.com\", \"tls\": { \"enabled\": true, \"certificate_path\": \"$FILE_CERT\", \"key_path\": \"$FILE_KEY\" }, \"ignore_client_bandwidth\": false${obfs_part}}")
-    fi
-    if [ -n "$PORT_R" ]; then
-        local sd="${DEST%:*}"
-        local sp="${DEST##*:}"
-        [ "$sd" == "$DEST" ] && sp=443
-        inbounds+=("{\"type\": \"vless\", \"listen\": \"$listen_ip\", \"listen_port\": $PORT_R, \"users\": [{\"uuid\": \"$uuid\", \"flow\": \"xtls-rprx-vision\"}], \"tls\": { \"enabled\": true, \"server_name\": \"$SNI\", \"reality\": { \"enabled\": true, \"handshake\": { \"server\": \"$sd\", \"server_port\": $sp }, \"private_key\": \"$priv\", \"short_id\": [\"$short_id\"] }}}")
+    # Tuic
+    if [ -n "$T_PORT" ] && [ "$tls_ready" -eq 1 ]; then
+        inbound_json="${inbound_json} {
+            \"type\": \"tuic\", \"listen\": \"$listen_ip\", \"listen_port\": $T_PORT,
+            \"users\": [{\"uuid\": \"$UUID\", \"password\": \"$sec_key\"}],
+            \"congestion_control\": \"bbr\",
+            \"tls\": {\"enabled\": true, \"certificate_path\": \"$FILE_CERT\", \"key_path\": \"$FILE_KEY\", \"alpn\": [\"h3\"]}
+        },"
     fi
     
-    local inbounds_json=$(IFS=,; echo "${inbounds[*]}")
+    # Hysteria2
+    if [ -n "$H_PORT" ] && [ "$tls_ready" -eq 1 ]; then
+        local obfs_json=""
+        if [ "$HY2_OBFS" = "true" ]; then
+            obfs_json="\"obfs\": {\"type\": \"salamander\", \"password\": \"$sec_key\"},"
+        fi
+        inbound_json="${inbound_json} {
+            \"type\": \"hysteria2\", \"listen\": \"$listen_ip\", \"listen_port\": $H_PORT,
+            \"users\": [{\"password\": \"$UUID\"}],
+            \"masquerade\": \"https://bing.com\",
+            \"tls\": {\"enabled\": true, \"certificate_path\": \"$FILE_CERT\", \"key_path\": \"$FILE_KEY\"},
+            \"ignore_client_bandwidth\": false,
+            $obfs_json
+            \"xx\": 0
+        },"
+    fi
+    
+    # Vless/Reality
+    if [ -n "$R_PORT" ]; then
+        local s_host=$(echo "$DEST" | cut -d: -f1)
+        local s_port=$(echo "$DEST" | cut -d: -f2)
+        if [ -z "$s_port" ] || [ "$s_port" = "$s_host" ]; then s_port=443; fi
+        
+        inbound_json="${inbound_json} {
+            \"type\": \"vless\", \"listen\": \"$listen_ip\", \"listen_port\": $R_PORT,
+            \"users\": [{\"uuid\": \"$UUID\", \"flow\": \"xtls-rprx-vision\"}],
+            \"tls\": {
+                \"enabled\": true, \"server_name\": \"$SNI\",
+                \"reality\": {
+                    \"enabled\": true, \"handshake\": {\"server\": \"$s_host\", \"server_port\": $s_port},
+                    \"private_key\": \"$pk\", \"short_id\": [\"$sid\"]
+                }
+            }
+        },"
+    fi
+    
+    # 清理末尾逗号 hack
+    inbound_json=$(echo "$inbound_json" | sed 's/,}/}/g' | sed 's/,\s*$//')
+    
     cat > "$FILE_CONF" <<EOF
 {
-  "log": { "disabled": true, "level": "warn", "timestamp": true },
-  "inbounds": [ $inbounds_json ],
-  "outbounds": [{ "type": "direct", "tag": "direct" }],
-  "route": { "final": "direct" }
+  "log": {"disabled": true, "level": "warn", "timestamp": true},
+  "inbounds": [$inbound_json],
+  "outbounds": [{"type": "direct", "tag": "direct"}],
+  "route": {"final": "direct"}
 }
 EOF
 
-    local ip="127.0.0.1"
-    local ext_ip=$(curl -s --connect-timeout 3 https://api.ipify.org)
-    [ -n "$ext_ip" ] && ip=$(echo "$ext_ip" | xargs)
-    sys_log "Net" "Public endpoint detected: $ip"
+    # 获取 IP
+    local pub_ip="127.0.0.1"
+    pub_ip=$(curl -s --connect-timeout 3 https://api.ipify.org || echo "127.0.0.1")
+    sys_log "Net" "Server IP: $pub_ip"
     
-    local s=""
-    if [ -n "$PORT_T" ] && [ "$tls_ready" = true ]; then
-        s+="tuic://${uuid}:${sec_key}@${ip}:${PORT_T}?sni=${CERT_DOMAIN}&alpn=h3&congestion_control=bbr#${PREFIX}-T"$'\n'
+    # 生成链接
+    local links=""
+    if [ -n "$T_PORT" ] && [ "$tls_ready" -eq 1 ]; then
+        links="${links}tuic://${UUID}:${sec_key}@${pub_ip}:${T_PORT}?sni=${CERT_DOMAIN}&alpn=h3&congestion_control=bbr#${PREFIX}-T\n"
     fi
-    if [ -n "$PORT_H" ] && [ "$tls_ready" = true ]; then
-        s+="hysteria2://${uuid}@${ip}:${PORT_H}/?sni=${CERT_DOMAIN}&insecure=1"
-        [ "$HY2_OBFS" == "true" ] && s+="&obfs=salamander&obfs-password=${sec_key}"
-        s+="#${PREFIX}-H"$'\n'
+    if [ -n "$H_PORT" ] && [ "$tls_ready" -eq 1 ]; then
+        local h_params="sni=${CERT_DOMAIN}&insecure=1"
+        if [ "$HY2_OBFS" = "true" ]; then h_params="${h_params}&obfs=salamander&obfs-password=${sec_key}"; fi
+        links="${links}hysteria2://${UUID}@${pub_ip}:${H_PORT}/?${h_params}#${PREFIX}-H\n"
     fi
-    if [ -n "$PORT_R" ]; then
-        s+="vless://${uuid}@${ip}:${PORT_R}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=edge&pbk=${pub}&sid=${short_id}&type=tcp#${PREFIX}-R"$'\n'
+    if [ -n "$R_PORT" ]; then
+        links="${links}vless://${UUID}@${pub_ip}:${R_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=edge&pbk=${pub}&sid=${sid}&type=tcp#${PREFIX}-R\n"
     fi
     
-    local b64=$(echo -n "$s" | base64 | tr -d '\n')
-    save_file "$FILE_SUB" "$b64"
+    local b64=$(echo -e "$links" | base64 | tr -d '\n')
+    echo "$b64" > "$FILE_SUB"
     
     sys_log "Sys" "Service initialized"
     echo ""
-    echo "========== SESSION TICKET =========="
+    echo "========== ACCESS TOKEN =========="
     echo "$b64"
-    echo "===================================="
+    echo "=================================="
     echo ""
-}
 
-filter_log() {
-    local key="$1" prefix="LinkAgent"
-    [ "$key" == "srv" ] && prefix="CoreService"
-    while IFS= read -r line; do
-        [ ${#line} -lt 5 ] && continue
-        echo "$line" | grep -qE "Komari|sing-box|SagerNet|version|Github|DNS|Mountpoints|Interfaces|Using|Checking|Current|Get|Attempting|IPV4" && continue
-        local msg="$line"
-        msg=${msg/WebSocket/Uplink}; msg=${msg/uploaded/Sync}; msg=${msg/connected/est}
-        if echo "$msg" | grep -qE "error|fatal|panic"; then 
-            sys_log "ERR" "[$prefix] Runtime exception"
-        elif ! $IS_SILENT; then
-             sys_log "$prefix" "${msg:0:50}"
-        fi
-    done
-}
+    # 准备 Web 服务目录
+    rm -rf "$WEB_ROOT"
+    mkdir -p "$WEB_ROOT/api"
+    
+    # 生成 HTML
+    cat > "$WEB_ROOT/index.html" <<EOF
+<!DOCTYPE html><html><head><title>Service Status</title></head><body><h3>Service Operational</h3><p>The backend interface is running normally.</p></body></html>
+EOF
+    
+    # 放置订阅文件
+    cp "$FILE_SUB" "$WEB_ROOT/api/data"
+    
+    # 放置心跳文件
+    echo '{"status":"OK"}' > "$WEB_ROOT/api/heartbeat"
 
-spawn_service() {
-    local key="$1" bin="$2"; shift 2; local args=("$@")
-    local old_pid="${STATE_PID[$key]}"
-    if [ "$old_pid" -gt 0 ] && kill -0 "$old_pid" 2>/dev/null; then return; fi
-    STATE_LAST_START["$key"]=$(date +%s%3N)
-    ("$bin" "${args[@]}" 2>&1 | filter_log "$key") &
-    STATE_PID["$key"]=$!
-}
-
-NEXT_CRON_TS=0
-check_cron() {
-    [ -z "$CRON" ] && return
-    local now_sec=$(date +%s)
-    if [ "$NEXT_CRON_TS" -eq 0 ]; then NEXT_CRON_TS=$((now_sec + 60)); return; fi
-    if [ "$now_sec" -ge "$NEXT_CRON_TS" ]; then
-        local cron_str="$CRON"
-        [[ "$cron_str" == "true" || "$cron_str" == "1" ]] && cron_str="UTC+8 06:30"
-        if [[ "$cron_str" =~ UTC([+-]?[0-9]+)[[:space:]]+([0-9]+):([0-9]+) ]]; then
-            local off="${BASH_REMATCH[1]}" h="${BASH_REMATCH[2]}" min="${BASH_REMATCH[3]}"
-            local utc_now=$(date -u +%s)
-            local offset_sec=$((off * 3600))
-            local target_zone_now=$((utc_now + offset_sec))
-            local target_day=$(date -u -d "@$target_zone_now" +%Y-%m-%d)
-            local target_ts=$(date -u -d "$target_day $h:$min:00" +%s)
-            [ "$target_ts" -le "$target_zone_now" ] && target_ts=$((target_ts + 86400))
-            local wait_until=$((target_ts - offset_sec))
-            if [ "$NEXT_CRON_TS" -ne 0 ] && [ "$now_sec" -ge "$NEXT_CRON_TS" ]; then
-                [ "${STATE_PID["srv"]}" -gt 0 ] && kill -SIGTERM "${STATE_PID["srv"]}"
-                [ "${STATE_PID["mon"]}" -gt 0 ] && kill -SIGTERM "${STATE_PID["mon"]}"
-                NEXT_CRON_TS=$wait_until
-            elif [ "$NEXT_CRON_TS" -eq 0 ]; then NEXT_CRON_TS=$wait_until; fi
-        fi
-    fi
-}
-
-monitor_loop() {
-    local bin_srv="$1" bin_mon="$2"
+    # 启动进程
+    sys_log "Sys" "Starting Core..."
     export GOGC=80
-    local mem_total=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-    [ "$mem_total" -lt 262144 ] && export GOMEMLIMIT="100MiB"
-    spawn_service "srv" "$bin_srv" "run" "-c" "$FILE_CONF"
+    "$bin_srv" run -c "$FILE_CONF" >/dev/null 2>&1 &
+    PID_SRV=$!
+    
+    PID_MON=""
     if [ -n "$bin_mon" ] && [ -n "$PROBE_URL" ]; then
-        sys_log "Mon" "Telemetry agent active"
-        local u="$PROBE_URL"; [[ "$u" != http* ]] && u="https://$u"
-        spawn_service "mon" "$bin_mon" "-e" "$u" "-t" "$PROBE_TOK"
+        local mon_url="$PROBE_URL"
+        if echo "$mon_url" | grep -v -q "^http"; then mon_url="https://$mon_url"; fi
+        sys_log "Sys" "Starting Monitor..."
+        "$bin_mon" -e "$mon_url" -t "$PROBE_TOK" >/dev/null 2>&1 &
+        PID_MON=$!
     fi
-    (sleep 60; IS_SILENT=true; sys_log "Sys" "Entering silent mode") &
+    
+    sys_log "Web" "Service running on $WEB_PORT"
+    # 使用 busybox httpd 提供轻量级 Web 服务
+    busybox httpd -p "$WEB_PORT" -h "$WEB_ROOT"
+    
+    # 守护进程与CRON逻辑
     while true; do
-        local now=$(date +%s%3N)
-        for key in "srv" "mon"; do
-            [ "$key" == "mon" ] && { [ -z "$bin_mon" ] || [ -z "$PROBE_URL" ]; } && continue
-            local pid="${STATE_PID[$key]}" last_start="${STATE_LAST_START[$key]}"
-            if ! kill -0 "$pid" 2>/dev/null; then
-                 local live_time=$((now - last_start))
-                 if [ "$live_time" -gt 30000 ]; then STATE_CRASH_COUNT["$key"]=0; else STATE_CRASH_COUNT["$key"]=$((STATE_CRASH_COUNT["$key"] + 1)); fi
-                 local count="${STATE_CRASH_COUNT[$key]}"
-                 local delay=$(( 2000 * (2 ** count) )); [ "$delay" -gt 60000 ] && delay=60000
-                 local label="Core"; [ "$key" == "mon" ] && label="Agent"
-                 sys_log "Sys" "$label reload in $((delay/1000))s"
-                 sleep $((delay/1000))
-                 if [ "$key" == "srv" ]; then spawn_service "srv" "$bin_srv" "run" "-c" "$FILE_CONF"
-                 else spawn_service "mon" "$bin_mon" "-e" "$u" "-t" "$PROBE_TOK"; fi
+        if ! kill -0 $PID_SRV 2>/dev/null; then
+             sys_log "ERR" "Core crashed, restarting..."
+             "$bin_srv" run -c "$FILE_CONF" >/dev/null 2>&1 &
+             PID_SRV=$!
+        fi
+        
+        if [ -n "$PID_MON" ] && ! kill -0 $PID_MON 2>/dev/null; then
+             sys_log "ERR" "Monitor crashed, restarting..."
+             "$bin_mon" -e "$PROBE_URL" -t "$PROBE_TOK" >/dev/null 2>&1 &
+             PID_MON=$!
+        fi
+        
+        # 刷新心跳
+        local tick=$(($(date +%s) - $(date -r "$FILE_CONF" +%s)))
+        echo "{\"status\":\"OK\",\"tick\":$tick}" > "$WEB_ROOT/api/heartbeat"
+        
+        # 简单的 Cron 重启逻辑 (UTC+8 06:30)
+        if [ -n "$CRON" ]; then
+            current_hour=$(date -u -d "+8 hours" +%H)
+            current_min=$(date -u -d "+8 hours" +%M)
+            if [ "$current_hour" = "06" ] && [ "$current_min" = "30" ]; then
+                 sys_log "Sys" "Scheduled restart..."
+                 kill $PID_SRV 2>/dev/null
+                 if [ -n "$PID_MON" ]; then kill $PID_MON 2>/dev/null; fi
+                 sleep 65 # 避免一分钟内重复重启
             fi
-        done
-        check_cron
-        sleep 2
+        fi
+        
+        sleep 10
     done
 }
 
-start_http_server() {
-    local cmd="nc"; command -v netcat &>/dev/null && cmd="netcat"
-    sys_log "Web" "Service running on $PORT_WEB"
-    while true; do
-        { echo -ne "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: auto\r\n\r\n";
-          read -t 1 -r line || true
-          line=${line%%$'\r'}; local path=$(echo "$line" | awk '{print $2}')
-          if [[ "$path" == "/api/data"* ]] && [ -f "$FILE_SUB" ]; then
-               cat "$FILE_SUB"
-          elif [[ "$path" == "/api/heartbeat" ]]; then
-               local pid="${STATE_PID["srv"]}" ok=false
-               if [ "$pid" -gt 0 ] && kill -0 "$pid" 2>/dev/null; then ok=true; fi
-               local status="ERR"; local tick=0
-               if [ "$ok" = true ]; then status="OK"; tick=$(( ( $(date +%s%3N) - STATE_LAST_START["srv"] ) / 1000 )); fi
-               echo -n "{\"status\": \"$status\", \"tick\": $tick}"
-          else
-               echo "<!DOCTYPE html><html><head><title>Service Status</title></head><body style=\"font-family:sans-serif;text-align:center;padding:50px;\"><h1>Service Operational</h1><p>The backend interface is running normally.</p></body></html>"
-          fi
-        } | timeout 3 $cmd -l -p $PORT_WEB >/dev/null 2>&1
-        sleep 0.1
-    done
-}
-
-BIN_SRV=$(fetch_bin "srv")
-BIN_MON=$(fetch_bin "mon")
-if [ -z "$BIN_SRV" ]; then echo "Fatal: Core binary fetch failed."; exit 1; fi
-disk_clean "$BIN_SRV" "$BIN_MON"
-prepare_env "$BIN_SRV"
-start_http_server &
-monitor_loop "$BIN_SRV" "$BIN_MON"
+main
