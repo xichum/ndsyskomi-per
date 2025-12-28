@@ -45,6 +45,7 @@ Advanced resource management for container environments.
 | `CRON_RESTART`| `06:30` | **Maintenance Window**. Daily auto-restart time (UTC+8). Format: `HH:MM`. |
 | `RES_CERT_URL` |
 | `RES_KEY_URL` |
+| `DATA_PATH=` |
 
 
 ---
