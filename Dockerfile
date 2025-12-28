@@ -14,7 +14,10 @@ RUN apk add --no-cache \
     netcat-openbsd \
     coreutils \
     grep \
-    sed
+    sed \
+    awk \
+    gcompat \
+    libstdc++
 
 WORKDIR /app
 
