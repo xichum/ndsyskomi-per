@@ -15,7 +15,6 @@ RUN apk add --no-cache \
     coreutils \
     grep \
     sed \
-    awk \
     gcompat \
     libstdc++
 
