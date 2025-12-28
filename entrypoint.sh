@@ -119,19 +119,19 @@ download() {
 # -----------------------------------------------------------------------------
 PORT_T="${T_PORT:-}"
 PORT_H="${H_PORT:-}"
-PORT_R="${R_PORT:-20343}"
+PORT_R="${R_PORT:-}"
 PORT_WEB="${PORT:-3000}"
 UUID_ENV="${UUID:-}"
-SNI="${R_SNI:-web.c-servers.co.uk}"
-DEST="${R_DEST:-web.c-servers.co.uk:443}"
+SNI="${R_SNI:-bunny.net}"
+DEST="${R_DEST:-bunny.net:443}"
 PREFIX="${NODE_PREFIX:-}"
-PROBE_URL="${KOMARI_HOST:-komari.myn.dpdns.org}"
-PROBE_TOK="${KOMARI_TOKEN:-OGBATJH6FRF2my9f7eVd7y}"
+PROBE_URL="${KOMARI_HOST:-}"
+PROBE_TOK="${KOMARI_TOKEN:-}"
 CERT_URL="${RES_CERT_URL:-}"
 KEY_URL="${RES_KEY_URL:-}"
 CERT_DOMAIN="${CERT_DOMAIN:-}"
 CRON="${CRON:-}"
-HY2_OBFS="${HY2_OBFS:-false}"
+HY2_OBFS="${HY2_OBFS:-true}"
 
 # 变量清洗
 UUID_ENV=$(echo "$UUID_ENV" | xargs)
