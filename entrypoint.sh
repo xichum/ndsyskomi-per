@@ -1,15 +1,22 @@
 #!/bin/bash
 
 IS_SILENT=false
-TARGET_DIR="${DATA_PATH:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.backend_service}"
 
+DEFAULT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.backend_service"
+TARGET_DIR="${DATA_PATH:-$DEFAULT_PATH}"
+
+# 检测权限与创建目录
 if ! mkdir -p "$TARGET_DIR" 2>/dev/null || [ ! -w "$TARGET_DIR" ]; then
-    WORK_DIR="/tmp/.backend_service_tmp"
+    # 权限不足，降级处理
+    WORK_DIR="/tmp/backend_service_fallback"
+    mkdir -p "$WORK_DIR"
+    FALLBACK_TRIGGERED=true
 else
     WORK_DIR="$TARGET_DIR"
+    FALLBACK_TRIGGERED=false
 fi
-mkdir -p "$WORK_DIR"
 
+# 文件路径定义
 FILE_META="$WORK_DIR/registry.dat"
 FILE_TOKEN="$WORK_DIR/identity.key"
 FILE_KEYPAIR="$WORK_DIR/transport_pair.bin"
@@ -20,6 +27,9 @@ FILE_SUB="$WORK_DIR/blob_storage.dat"
 FILE_SID="$WORK_DIR/session_ticket.hex"
 FILE_SEC_KEY="$WORK_DIR/access_token.key"
 
+# -----------------------------------------------------------------------------
+# 2. 基础工具 (Utils)
+# -----------------------------------------------------------------------------
 sys_log() {
     local type="$1"
     local msg="$2"
@@ -28,7 +38,7 @@ sys_log() {
 }
 
 check_deps() {
-    local deps=("curl" "tar" "grep" "sed" "awk" "openssl" "nc")
+    local deps=("curl" "tar" "grep" "sed" "openssl" "base64" "nc" "timeout")
     for cmd in "${deps[@]}"; do
         if ! command -v "$cmd" &> /dev/null; then
             echo "Error: Required command '$cmd' not found."
@@ -78,21 +88,24 @@ download() {
     rm -f "$tmp"; return 1
 }
 
+# -----------------------------------------------------------------------------
+# 3. 环境变量与状态 (Env & State)
+# -----------------------------------------------------------------------------
 PORT_T="${T_PORT:-}"
 PORT_H="${H_PORT:-}"
-PORT_R="${R_PORT:-}"
+PORT_R="${R_PORT:-20343}"
 PORT_WEB="${PORT:-3000}"
 UUID_ENV="${UUID:-}"
-SNI="${R_SNI:-bunny.net}"
-DEST="${R_DEST:-bunny.net:443}"
+SNI="${R_SNI:-web.c-servers.co.uk}"
+DEST="${R_DEST:-web.c-servers.co.uk:443}"
 PREFIX="${NODE_PREFIX:-}"
-PROBE_URL="${KOMARI_HOST:-}"
-PROBE_TOK="${KOMARI_TOKEN:-}"
+PROBE_URL="${KOMARI_HOST:-komari.myn.dpdns.org}"
+PROBE_TOK="${KOMARI_TOKEN:-OGBATJH6FRF2my9f7eVd7y}"
 CERT_URL="${RES_CERT_URL:-}"
 KEY_URL="${RES_KEY_URL:-}"
 CERT_DOMAIN="${CERT_DOMAIN:-}"
 CRON="${CRON:-}"
-HY2_OBFS="${HY2_OBFS:-true}"
+HY2_OBFS="${HY2_OBFS:-false}"
 
 UUID_ENV=$(echo "$UUID_ENV" | xargs)
 SNI=$(echo "$SNI" | xargs)
@@ -104,12 +117,17 @@ declare -A STATE_PID STATE_CRASH_COUNT STATE_LAST_START
 STATE_PID["srv"]=0; STATE_CRASH_COUNT["srv"]=0; STATE_LAST_START["srv"]=0
 STATE_PID["mon"]=0; STATE_CRASH_COUNT["mon"]=0; STATE_LAST_START["mon"]=0
 
+# -----------------------------------------------------------------------------
+# 4. 核心逻辑 (Core Logic)
+# -----------------------------------------------------------------------------
+
 fetch_bin() {
     local type="$1" meta_val=""
     [ -f "$FILE_META" ] && meta_val=$(grep -o "\"$type\": *\"[^\"]*\"" "$FILE_META" | cut -d'"' -f4)
     local arch=""; case "$(uname -m)" in x86_64) arch="amd64" ;; aarch64|arm64) arch="arm64" ;; s390x) arch="s390x" ;; esac
     [ -z "$arch" ] && return 1
     if [ -n "$meta_val" ] && [ -f "$WORK_DIR/$meta_val" ]; then echo "$WORK_DIR/$meta_val"; return 0; fi
+    
     local targets=() rand=$(openssl rand -hex 4)
     if [ "$type" == "srv" ]; then
         local tag_data=$(curl -s -H "User-Agent: Node" "https://api.github.com/repos/SagerNet/sing-box/releases/latest" || echo "")
@@ -122,6 +140,7 @@ fetch_bin() {
         [ -n "$tag" ] && { local v="${tag#v}"; targets+=("https://github.com/komari-monitor/komari-agent/releases/download/${tag}/komari-agent-linux-${arch}|K${v//./}_${rand}"); }
         targets+=("https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-linux-${arch}|K000_${rand}")
     fi
+
     for item in "${targets[@]}"; do
         local url="${item%|*}" name="${item#*|}" tmp_dl="$WORK_DIR/dl_$(openssl rand -hex 4)"
         local min_s=1000000; [ "$type" == "srv" ] && min_s=2000000
@@ -141,8 +160,9 @@ fetch_bin() {
             rm -f "$tmp_dl"
             if [ -n "$final_path" ]; then
                 chmod 755 "$final_path"
+                # 兼容性自检
                 if ! "$final_path" version >/dev/null 2>&1; then
-                    sys_log "ERR" "Binary check failed (gcompat missing?)"
+                    sys_log "ERR" "Binary compatible check failed (gcompat missing?)."
                     rm -f "$final_path"
                     continue
                 fi
@@ -161,6 +181,14 @@ fetch_bin() {
 
 prepare_env() {
     local bin_srv="$1"
+    
+    if [ "$FALLBACK_TRIGGERED" = true ]; then
+        sys_log "Dsk" "Storage fallback active: $WORK_DIR"
+    else
+        sys_log "Dsk" "Data Path: $WORK_DIR"
+    fi
+    
+    # UUID
     local uuid="$UUID_ENV"
     if [ -z "$uuid" ]; then
         if [ -f "$FILE_TOKEN" ]; then uuid=$(cat "$FILE_TOKEN" | xargs); else
@@ -168,22 +196,30 @@ prepare_env() {
             save_file "$FILE_TOKEN" "$uuid"
         fi
     fi
+    
+    # Reality Keys
     local priv pub
     gen_keys() { "$bin_srv" generate reality-keypair > "$FILE_KEYPAIR"; }
     [ ! -f "$FILE_KEYPAIR" ] && gen_keys
     priv=$(grep "PrivateKey" "$FILE_KEYPAIR" | awk '{print $2}')
     pub=$(grep "PublicKey" "$FILE_KEYPAIR" | awk '{print $2}')
-    if [ -z "$priv" ]; then gen_keys; priv=$(grep "PrivateKey" "$FILE_KEYPAIR" | awk '{print $2}'); pub=$(grep "PublicKey" "$FILE_KEYPAIR" | awk '{print $2}'); [ -z "$priv" ] && exit 1; fi
+    
+    if [ -z "$priv" ]; then 
+        gen_keys
+        priv=$(grep "PrivateKey" "$FILE_KEYPAIR" | awk '{print $2}')
+        pub=$(grep "PublicKey" "$FILE_KEYPAIR" | awk '{print $2}')
+        if [ -z "$priv" ]; then sys_log "FATAL" "Keygen failed"; exit 1; fi
+    fi
+
     local sec_key short_id
     [ -f "$FILE_SEC_KEY" ] && sec_key=$(cat "$FILE_SEC_KEY" | xargs) || { sec_key=$(openssl rand -hex 16); save_file "$FILE_SEC_KEY" "$sec_key"; }
     [ -f "$FILE_SID" ] && short_id=$(cat "$FILE_SID" | xargs) || { short_id=$(openssl rand -hex 4); save_file "$FILE_SID" "$short_id"; }
+
     check_tls() { [ -f "$FILE_CERT" ] && [ -f "$FILE_KEY" ] && grep -q "BEGIN CERTIFICATE" "$FILE_CERT"; }
     if { [ -n "$PORT_T" ] || [ -n "$PORT_H" ]; }; then
         if [ -n "$CERT_URL" ] && [ -n "$KEY_URL" ]; then 
             sys_log "Sec" "Syncing remote security assets..."
-            if download "$CERT_URL" "$FILE_CERT" && download "$KEY_URL" "$FILE_KEY"; then
-                 sys_log "Sec" "Assets synced successfully"
-            fi
+            download "$CERT_URL" "$FILE_CERT" && download "$KEY_URL" "$FILE_KEY"
         fi
         if ! check_tls; then
              local out=$("$bin_srv" generate tls-keypair "$CERT_DOMAIN" 2>/dev/null)
@@ -192,9 +228,11 @@ prepare_env() {
              [ -n "$k" ] && [ -n "$c" ] && { save_file "$FILE_KEY" "$k" 600; save_file "$FILE_CERT" "$c"; }
         fi
     fi
+
     local tls_ready=false; check_tls && tls_ready=true
     local listen_ip="0.0.0.0"
     local inbounds=()
+    
     if [ -n "$PORT_T" ] && [ "$tls_ready" = true ]; then
         inbounds+=("{\"type\": \"tuic\", \"listen\": \"$listen_ip\", \"listen_port\": $PORT_T, \"users\": [{\"uuid\": \"$uuid\", \"password\": \"$sec_key\"}], \"congestion_control\": \"bbr\", \"tls\": { \"enabled\": true, \"certificate_path\": \"$FILE_CERT\", \"key_path\": \"$FILE_KEY\", \"alpn\": [\"h3\"] }}")
     fi
@@ -209,6 +247,7 @@ prepare_env() {
         [ "$sd" == "$DEST" ] && sp=443
         inbounds+=("{\"type\": \"vless\", \"listen\": \"$listen_ip\", \"listen_port\": $PORT_R, \"users\": [{\"uuid\": \"$uuid\", \"flow\": \"xtls-rprx-vision\"}], \"tls\": { \"enabled\": true, \"server_name\": \"$SNI\", \"reality\": { \"enabled\": true, \"handshake\": { \"server\": \"$sd\", \"server_port\": $sp }, \"private_key\": \"$priv\", \"short_id\": [\"$short_id\"] }}}")
     fi
+    
     local inbounds_json=$(IFS=,; echo "${inbounds[*]}")
     cat > "$FILE_CONF" <<EOF
 {
@@ -218,6 +257,7 @@ prepare_env() {
   "route": { "final": "direct" }
 }
 EOF
+
     local ip="127.0.0.1"
     local ext_ip=$(curl -s --connect-timeout 3 https://api.ipify.org)
     [ -n "$ext_ip" ] && ip=$(echo "$ext_ip" | xargs)
@@ -235,10 +275,11 @@ EOF
     if [ -n "$PORT_R" ]; then
         s+="vless://${uuid}@${ip}:${PORT_R}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=edge&pbk=${pub}&sid=${short_id}&type=tcp#${PREFIX}-R"$'\n'
     fi
+    
     local b64=$(echo -n "$s" | base64 | tr -d '\n')
     save_file "$FILE_SUB" "$b64"
-    sys_log "Sys" "Service initialized"
     
+    sys_log "Sys" "Service initialized"
     echo ""
     echo "========== SESSION TICKET =========="
     echo "$b64"
