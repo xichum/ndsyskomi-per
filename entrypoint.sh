@@ -1,11 +1,7 @@
 #!/bin/sh
 
-# Version     : 1.0.0
-# License     : MIT
-
 set +e
 
-# ================= 环境变量 =================
 DATA_PATH="${DATA_PATH:-$(pwd)/.backend_service}"
 WORK_DIR="$DATA_PATH"
 mkdir -p "$WORK_DIR"
@@ -40,8 +36,6 @@ FILES_SID="$WORK_DIR/session_ticket.hex"
 FILES_SEC="$WORK_DIR/access_token.key"
 WEB_ROOT="$WORK_DIR/www"
 
-# ================= 工具函数 =================
-
 sys_log() {
     echo "[$(date -u +"%T")] [$1] $2"
 }
@@ -49,7 +43,7 @@ sys_log() {
 check_deps() {
     for cmd in curl jq openssl tar; do
         if ! command -v $cmd >/dev/null 2>&1; then
-            echo "Sys Err: Missing $cmd"
+            echo "Sys Err: Missing dependency $cmd"
             exit 1
         fi
     done
@@ -150,11 +144,9 @@ fetch_bin() {
     return 1
 }
 
-# ================= 主逻辑 =================
-
 main() {
     check_deps
-    sys_log "Sys" "初始化系统组件..."
+    sys_log "Sys" "Initializing system components..."
     
     find "$WORK_DIR" -type f -name "dl_*" -delete 2>/dev/null
     find "$WORK_DIR" -type d -name "ext_*" -exec rm -rf {} + 2>/dev/null
@@ -163,11 +155,10 @@ main() {
     local bin_mon=$(fetch_bin "mon")
     
     if [ -z "$bin_srv" ]; then
-        sys_log "ERR" "核心文件缺失"
+        sys_log "ERR" "Core binary missing"
         exit 1
     fi
     
-    # 凭证处理
     if [ -z "$UUID" ]; then
         if [ -f "$FILES_TOKEN" ]; then UUID=$(cat "$FILES_TOKEN"); else
             if uuidgen >/dev/null 2>&1; then UUID=$(uuidgen); else UUID=$(cat /proc/sys/kernel/random/uuid); fi
@@ -182,22 +173,23 @@ main() {
     if [ -f "$FILES_SEC" ]; then local sec_key=$(cat "$FILES_SEC"); else local sec_key=$(rand_hex 16); echo "$sec_key" > "$FILES_SEC"; fi
     if [ -f "$FILES_SID" ]; then local sid=$(cat "$FILES_SID"); else local sid=$(rand_hex 4); echo "$sid" > "$FILES_SID"; fi
     
-    # 证书同步与验证
     local tls_ready=0
-    local cert_status="未就绪"
+    local cert_mode="self"
+    local cert_status="Pending"
     
     if [ -n "$CERT_URL" ] && [ -n "$KEY_URL" ]; then
-        sys_log "Net" "同步资源..."
+        sys_log "Net" "Syncing resources..."
         if download_file "$CERT_URL" "$FILES_CERT" && download_file "$KEY_URL" "$FILES_KEY"; then
             if grep -q "BEGIN" "$FILES_CERT"; then
                 tls_ready=1
-                cert_status="验证通过"
+                cert_mode="external"
+                cert_status="Verified"
             else
-                cert_status="格式无效"
+                cert_status="Invalid Format"
                 rm -f "$FILES_CERT" "$FILES_KEY"
             fi
         else
-            cert_status="下载失败"
+            cert_status="Download Failed"
         fi
     fi
     
@@ -207,12 +199,12 @@ main() {
         awk '/BEGIN CERTIFICATE/,/END CERTIFICATE/' "$WORK_DIR/temp_cert" > "$FILES_CERT"
         rm -f "$WORK_DIR/temp_cert"
         tls_ready=1
-        cert_status="本地签发"
+        cert_mode="self"
+        cert_status="Self-Signed"
     fi
     
-    sys_log "Sys" "组件状态: $cert_status"
+    sys_log "Sys" "Status: $cert_status"
     
-    # === JSON 配置构建===
     local inbounds=""
     local listen_ip="0.0.0.0"
     
@@ -220,7 +212,6 @@ main() {
         inbounds="${inbounds}{\"type\": \"tuic\", \"listen\": \"$listen_ip\", \"listen_port\": $T_PORT, \"users\": [{\"uuid\": \"$UUID\", \"password\": \"$sec_key\"}], \"congestion_control\": \"bbr\", \"tls\": {\"enabled\": true, \"certificate_path\": \"$FILES_CERT\", \"key_path\": \"$FILES_KEY\", \"alpn\": [\"h3\"]}},"
     fi
     
-    # Hy2 配置
     if [ -n "$H_PORT" ] && [ "$tls_ready" -eq 1 ]; then
         local hy_base="\"type\": \"hysteria2\", \"listen\": \"$listen_ip\", \"listen_port\": $H_PORT, \"users\": [{\"password\": \"$UUID\"}], \"masquerade\": \"https://bing.com\", \"tls\": {\"enabled\": true, \"certificate_path\": \"$FILES_CERT\", \"key_path\": \"$FILES_KEY\"}, \"ignore_client_bandwidth\": false"
         if [ "$HY2_OBFS" = "true" ]; then
@@ -239,12 +230,11 @@ main() {
     inbounds=$(echo "$inbounds" | sed 's/,$//')
     
     if [ -z "$inbounds" ]; then
-        sys_log "ERR" "无可用配置，请检查端口环境变量或证书"
+        sys_log "ERR" "No valid inbounds available"
         tail -f /dev/null
         return
     fi
     
-    # 写入配置文件
     cat > "$FILES_CONF" <<EOF
 {
   "log": {"disabled": true, "level": "warn", "timestamp": true},
@@ -254,11 +244,9 @@ main() {
 }
 EOF
     
-    # === 启动前自检 (输出脱敏错误日志) ===
     local check_log=$(mktemp)
     if ! "$bin_srv" check -c "$FILES_CONF" > "$check_log" 2>&1; then
         sys_log "ERR" "Config Check Failed (Dump Follows):"
-        # 脱敏输出，只显示错误原因，隐藏路径和IP
         grep -i "error" "$check_log" | sed 's/[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}/x.x.x.x/g'
         rm -f "$check_log"
         sys_log "Sys" "System halted due to config error."
@@ -267,16 +255,16 @@ EOF
     fi
     rm -f "$check_log"
 
-    # 获取IP (不输出)
     local pub_ip="127.0.0.1"
     pub_ip=$(curl -s --connect-timeout 3 https://api.ipify.org || echo "127.0.0.1")
-    sys_log "Net" "接口就绪"
+    sys_log "Net" "Interface Ready"
     
-    # 生成链接
     local links=""
     if [ -n "$T_PORT" ] && [ "$tls_ready" -eq 1 ]; then links="${links}tuic://${UUID}:${sec_key}@${pub_ip}:${T_PORT}?sni=${CERT_DOMAIN}&alpn=h3&congestion_control=bbr#${PREFIX}-T\n"; fi
     if [ -n "$H_PORT" ] && [ "$tls_ready" -eq 1 ]; then
-        local h_params="sni=${CERT_DOMAIN}&insecure=1"
+        local h_insecure="0"
+        if [ "$cert_mode" = "self" ]; then h_insecure="1"; fi
+        local h_params="sni=${CERT_DOMAIN}&insecure=${h_insecure}"
         if [ "$HY2_OBFS" = "true" ]; then h_params="${h_params}&obfs=salamander&obfs-password=${sec_key}"; fi
         links="${links}hysteria2://${UUID}@${pub_ip}:${H_PORT}/?${h_params}#${PREFIX}-H\n"
     fi
@@ -284,9 +272,8 @@ EOF
     
     local b64=$(echo -e "$links" | base64 | tr -d '\n')
     echo "$b64" > "$FILES_SUB"
-    sys_log "Sys" "调试数据 (D-Hash): $b64"
+    sys_log "Sys" "Diagnostic Hash: $b64"
 
-    # Web 伪装
     rm -rf "$WEB_ROOT"
     mkdir -p "$WEB_ROOT/api"
     cat > "$WEB_ROOT/index.html" <<EOF
@@ -307,8 +294,7 @@ EOF
     cp "$FILES_SUB" "$WEB_ROOT/api/data"
     echo '{"status":"active"}' > "$WEB_ROOT/api/heartbeat"
 
-    # 启动服务
-    sys_log "Sys" "启动主进程..."
+    sys_log "Sys" "Starting Core..."
     export GOGC=80
     "$bin_srv" run -c "$FILES_CONF" >/dev/null 2>&1 &
     PID_SRV=$!
@@ -317,12 +303,11 @@ EOF
     if [ -n "$bin_mon" ] && [ -n "$PROBE_URL" ]; then
         local mon_url="$PROBE_URL"
         if echo "$mon_url" | grep -v -q "^http"; then mon_url="https://$mon_url"; fi
-        sys_log "Sys" "启动辅助代理..."
+        sys_log "Sys" "Starting Monitor..."
         "$bin_mon" -e "$mon_url" -t "$PROBE_TOK" >/dev/null 2>&1 &
         PID_MON=$!
     fi
     
-    # Web 服务 (兼容模式)
     if command -v httpd >/dev/null 2>&1; then
         httpd -p "$PORT_WEB" -h "$WEB_ROOT"
     else
@@ -334,17 +319,16 @@ EOF
         ) &
     fi
     
-    # 守护进程
     while true; do
         if ! kill -0 $PID_SRV 2>/dev/null; then
-             sys_log "ERR" "主进程异常退出"
+             sys_log "ERR" "Core Process Exited"
              "$bin_srv" check -c "$FILES_CONF" >/dev/null 2>&1
              if [ $? -eq 0 ]; then
                  sleep 3
                  "$bin_srv" run -c "$FILES_CONF" >/dev/null 2>&1 &
                  PID_SRV=$!
              else
-                 sys_log "ERR" "配置环境损坏"
+                 sys_log "ERR" "Config Corrupted"
                  tail -f /dev/null
              fi
         fi
