@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: '手动指定标签 (例如: v1.0.0)'
+        description: '手动指定标签 (例如: v1.0.1)'
         required: false
         default: 'latest'
         type: string
