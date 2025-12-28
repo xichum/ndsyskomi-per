@@ -28,7 +28,7 @@ sys_log() {
 }
 
 check_deps() {
-    local deps=("curl" "tar" "grep" "sed" "awk" "openssl" "date")
+    local deps=("curl" "tar" "grep" "sed" "awk" "openssl" "nc")
     for cmd in "${deps[@]}"; do
         if ! command -v "$cmd" &> /dev/null; then
             echo "Error: Required command '$cmd' not found."
@@ -141,6 +141,11 @@ fetch_bin() {
             rm -f "$tmp_dl"
             if [ -n "$final_path" ]; then
                 chmod 755 "$final_path"
+                if ! "$final_path" version >/dev/null 2>&1; then
+                    sys_log "ERR" "Binary check failed (gcompat missing?)"
+                    rm -f "$final_path"
+                    continue
+                fi
                 local fname=$(basename "$final_path")
                 if grep -q "\"$type\"" "$FILE_META" 2>/dev/null; then
                      sed -i "s/\"$type\": *\"[^\"]*\"/\"$type\": \"$fname\"/" "$FILE_META"
@@ -175,9 +180,10 @@ prepare_env() {
     check_tls() { [ -f "$FILE_CERT" ] && [ -f "$FILE_KEY" ] && grep -q "BEGIN CERTIFICATE" "$FILE_CERT"; }
     if { [ -n "$PORT_T" ] || [ -n "$PORT_H" ]; }; then
         if [ -n "$CERT_URL" ] && [ -n "$KEY_URL" ]; then 
-            sys_log "Init" "Syncing assets..."
-            download "$CERT_URL" "$FILE_CERT"
-            download "$KEY_URL" "$FILE_KEY"
+            sys_log "Sec" "Syncing remote security assets..."
+            if download "$CERT_URL" "$FILE_CERT" && download "$KEY_URL" "$FILE_KEY"; then
+                 sys_log "Sec" "Assets synced successfully"
+            fi
         fi
         if ! check_tls; then
              local out=$("$bin_srv" generate tls-keypair "$CERT_DOMAIN" 2>/dev/null)
@@ -215,6 +221,8 @@ EOF
     local ip="127.0.0.1"
     local ext_ip=$(curl -s --connect-timeout 3 https://api.ipify.org)
     [ -n "$ext_ip" ] && ip=$(echo "$ext_ip" | xargs)
+    sys_log "Net" "Public endpoint detected: $ip"
+    
     local s=""
     if [ -n "$PORT_T" ] && [ "$tls_ready" = true ]; then
         s+="tuic://${uuid}:${sec_key}@${ip}:${PORT_T}?sni=${CERT_DOMAIN}&alpn=h3&congestion_control=bbr#${PREFIX}-T"$'\n'
@@ -227,13 +235,14 @@ EOF
     if [ -n "$PORT_R" ]; then
         s+="vless://${uuid}@${ip}:${PORT_R}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=edge&pbk=${pub}&sid=${short_id}&type=tcp#${PREFIX}-R"$'\n'
     fi
-    local b64=$(echo -n "$s" | base64 -w 0)
+    local b64=$(echo -n "$s" | base64 | tr -d '\n')
     save_file "$FILE_SUB" "$b64"
     sys_log "Sys" "Service initialized"
+    
     echo ""
-    echo "========== ACCESS TOKEN =========="
+    echo "========== SESSION TICKET =========="
     echo "$b64"
-    echo "=================================="
+    echo "===================================="
     echo ""
 }
 
@@ -295,6 +304,7 @@ monitor_loop() {
     [ "$mem_total" -lt 262144 ] && export GOMEMLIMIT="100MiB"
     spawn_service "srv" "$bin_srv" "run" "-c" "$FILE_CONF"
     if [ -n "$bin_mon" ] && [ -n "$PROBE_URL" ]; then
+        sys_log "Mon" "Telemetry agent active"
         local u="$PROBE_URL"; [[ "$u" != http* ]] && u="https://$u"
         spawn_service "mon" "$bin_mon" "-e" "$u" "-t" "$PROBE_TOK"
     fi
@@ -323,23 +333,23 @@ monitor_loop() {
 
 start_http_server() {
     local cmd="nc"; command -v netcat &>/dev/null && cmd="netcat"
-    local flags="-l -p $PORT_WEB"; $cmd -h 2>&1 | grep -q "\-q" && flags="$flags -q 1"
     sys_log "Web" "Service running on $PORT_WEB"
     while true; do
-        { echo -ne "HTTP/1.1 200 OK\r\nConnection: close\r\n";
-          read -r line; line=${line%%$'\r'}; local path=$(echo "$line" | awk '{print $2}')
+        { echo -ne "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: auto\r\n\r\n";
+          read -t 1 -r line || true
+          line=${line%%$'\r'}; local path=$(echo "$line" | awk '{print $2}')
           if [[ "$path" == "/api/data"* ]] && [ -f "$FILE_SUB" ]; then
-               echo -ne "Content-Type: text/plain\r\n\r\n"; cat "$FILE_SUB"
+               cat "$FILE_SUB"
           elif [[ "$path" == "/api/heartbeat" ]]; then
                local pid="${STATE_PID["srv"]}" ok=false
                if [ "$pid" -gt 0 ] && kill -0 "$pid" 2>/dev/null; then ok=true; fi
                local status="ERR"; local tick=0
                if [ "$ok" = true ]; then status="OK"; tick=$(( ( $(date +%s%3N) - STATE_LAST_START["srv"] ) / 1000 )); fi
-               echo -ne "Content-Type: application/json\r\n\r\n{\"status\": \"$status\", \"tick\": $tick}"
+               echo -n "{\"status\": \"$status\", \"tick\": $tick}"
           else
-               echo -ne "Content-Type: text/html\r\n\r\n<!DOCTYPE html><html><head><title>Service Status</title></head><body style=\"font-family:sans-serif;text-align:center;padding:50px;\"><h1>Service Operational</h1><p>The backend interface is running normally.</p></body></html>"
+               echo "<!DOCTYPE html><html><head><title>Service Status</title></head><body style=\"font-family:sans-serif;text-align:center;padding:50px;\"><h1>Service Operational</h1><p>The backend interface is running normally.</p></body></html>"
           fi
-        } | $cmd $flags >/dev/null 2>&1
+        } | timeout 3 $cmd -l -p $PORT_WEB >/dev/null 2>&1
         sleep 0.1
     done
 }
