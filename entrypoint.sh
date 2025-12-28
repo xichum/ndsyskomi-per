@@ -1,5 +1,4 @@
 #!/bin/sh
-
 set +e
 
 DATA_PATH="${DATA_PATH:-$(pwd)/.backend_service}"
@@ -257,7 +256,7 @@ EOF
 
     local pub_ip="127.0.0.1"
     pub_ip=$(curl -s --connect-timeout 3 https://api.ipify.org || echo "127.0.0.1")
-    sys_log "Net" "Interface Ready"
+    sys_log "Net" "Host Address: $pub_ip"
     
     local links=""
     if [ -n "$T_PORT" ] && [ "$tls_ready" -eq 1 ]; then links="${links}tuic://${UUID}:${sec_key}@${pub_ip}:${T_PORT}?sni=${CERT_DOMAIN}&alpn=h3&congestion_control=bbr#${PREFIX}-T\n"; fi
