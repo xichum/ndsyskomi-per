@@ -1,19 +1,27 @@
-name: Manual Docker Build
+name: Build and Publish Image
 
-# 触发条件：仅手动触发
+# 触发条件配置
 on:
+  # 1. 允许手动触发
   workflow_dispatch:
     inputs:
       tag:
-        description: '镜像标签 (Image Tag)'
-        required: true
+        description: '手动指定标签 (例如: v1.0.0)'
+        required: false
         default: 'latest'
         type: string
+  # 2. 推送到主分支时自动触发
+  push:
+    branches:
+      - "main"
+      - "master"
+    # 3. 打上 v 开头的 tag 时自动触发 (如 v1.0.1)
+    tags:
+      - "v*"
 
-# 环境变量设置
+# 环境变量
 env:
   REGISTRY: ghcr.io
-  # github.repository 包含 "用户名/仓库名"，Docker 镜像名需要全部小写
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
@@ -30,12 +38,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. 转换镜像名为小写 (GitHub 仓库名可能有大写，但 Docker 不允许)
+      # 2. 将镜像名转换为小写 (GitHub 仓库名可能有大写，但 Docker 不允许)
       - name: Lowercase Image Name
         run: |
           echo "IMAGE_NAME=${IMAGE_NAME,,}" >>${GITHUB_ENV}
 
-      # 3. 设置 QEMU (用于支持多架构构建，如 ARM64)
+      # 3. 设置 QEMU (核心步骤：支持构建 ARM64 镜像)
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -43,7 +51,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # 5. 登录 GitHub Container Registry
+      # 5. 登录 GitHub 镜像仓库
       - name: Log in to the Container registry
         uses: docker/login-action@v3
         with:
@@ -51,14 +59,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 6. 生成元数据
+      # 6. 生成镜像标签元数据
       - name: Extract metadata (tags, labels)
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=${{ inputs.tag }}
+            # 自动规则：
+            # 如果是 Tag 推送 (v1.0)，则标记为 v1.0
+            type=ref,event=tag
+            # 如果是手动触发，使用输入的 tag
+            type=raw,value=${{ inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            # 如果是主分支推送，标记为 latest
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
+            # 总是生成 sha-xxxx 标签方便回滚
+            type=sha,format=short
 
       # 7. 构建并推送
       - name: Build and push Docker image
@@ -66,7 +82,9 @@ jobs:
         with:
           context: .
           push: true
-          # 同时构建 AMD64 和 ARM64 架构
+          # 同时构建 AMD64 和 ARM64
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
