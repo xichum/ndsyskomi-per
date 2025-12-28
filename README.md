@@ -43,8 +43,6 @@ Advanced resource management for container environments.
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `CRON_RESTART`| `06:30` | **Maintenance Window**. Daily auto-restart time (UTC+8). Format: `HH:MM`. |
-| `MEM_LIMIT` | `512` | **Heap Limit (MB)**.  |
-| `CPU_LIMIT` | `0.1` | **Heap Limit (CPU)**.  |
 | `RES_CERT_URL` |
 | `RES_KEY_URL` |
 
